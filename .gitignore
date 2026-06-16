@@ -1,0 +1,107 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Node / frontend build artifacts (regeneratable from package.json)
+node_modules/
+.next/
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# Output (generated files, don't track)
+output/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Blueprint PDFs (large, sensitive project data — don't commit)
+*.pdf
+
+# Large image files from analysis (regeneratable)
+floor_crops/
+legend_crops/
+symbols_auto/
+
+# Keep templates/ — those are needed for detection
+
+# Training artifacts (large, regeneratable)
+runs/
+yolo_dataset/
+yolo_dataset_v*/
+*.jpg
+
+# YOLO downloaded weights
+yolov8*.pt
+!models/hvac*.pt
+
+# Dataset zip (large)
+yolo_dataset.zip
+yolo_dataset_*.zip
+prepare_v*.log
+zip_v*.log
+
+# Colab benchmark package (large, regeneratable)
+colab_benchmark_pkg/
+
+# Tag-detection training dataset — ~27K PNG crops, regeneratable from ground_truth.jsonl
+tag_dataset/
+tag_dataset_test/
+tag_dataset_build.log
+debug_*.png
+debug_misses/
+
+# Tag-detection zips and YOLO dataset (large, regeneratable)
+tag_dataset.zip
+yolo_tag_dataset.zip
+yolo_tag_dataset/
+
+# Per-run benchmark outputs (per-project takeoff dirs are large, regeneratable)
+benchmark_output/
+
+# OCR labeling sample/log artifacts (regeneratable; full results go in tag_bubble_labels.jsonl)
+tag_bubble_labels.log
+tag_bubble_sample*.jsonl
+yolo_zip.log
+zip.log
+
+# Local Claude Code agent state (sessions, memory) — not part of the codebase
+.claude/
+
+# Scratch takeoff run outputs (regeneratable)
+run_demo*/
+
+# Session scratch + large training artifacts
+colab_bundle/*.zip
+viz/
+*.log
+api_excel.xlsx
+job.json
+models/hvac_yolov8s_v11.pt
+.gstack/
+
+# --- Added: close gaps for large / regeneratable / sensitive data ---
+
+# SaaS runtime data: customer uploads + generated job outputs.
+# SENSITIVE (customer drawings) and large — never commit.
+saas/data/
+
+# Regeneratable training / packaging bundles (large)
+colab_bundle/
+kaggle_bundle/
+
+# Diagnostic scratch page renders
+saas/_*.png

@@ -1,0 +1,90 @@
+{
+  "_comment": "Fixed v10-vs-v11 benchmark set. 'pdf' is rendered without annots for YOLO; 'truth' is the same Bluebeam-marked PDF, annotation layer = ground truth. split: held-out = NOT in v13 training (real generalization signal); in-sample = v13 training data (measures fit on corrections, esp. AD-GRD vs AD-T-BAR).",
+  "dataset_split_source": "yolo_dataset_v13/split.json",
+  "projects": [
+    {
+      "name": "Art Vascular & Interventional Assoc - ASC TI",
+      "slug": "art-vascular-interventional-assoc-asc-ti",
+      "split": "in-sample",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Art Vascular & Interventional Assoc - ASC TI.pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Art Vascular & Interventional Assoc - ASC TI.pdf"
+    },
+    {
+      "name": "Barings LA",
+      "slug": "barings-la",
+      "split": "held-out",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Barings LA.pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Barings LA.pdf"
+    },
+    {
+      "name": "Citadel Irvine",
+      "slug": "citadel-irvine",
+      "split": "in-sample",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Citadel Irvine.pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Citadel Irvine.pdf"
+    },
+    {
+      "name": "Irvine Fieldhouse",
+      "slug": "irvine-fieldhouse",
+      "split": "in-sample",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Irvine Fieldhouse.pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Irvine Fieldhouse.pdf"
+    },
+    {
+      "name": "Lynwood HS Modernization (A, C, Site)",
+      "slug": "lynwood-hs-modernization-a-c-site",
+      "split": "in-sample",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Lynwood HS Modernization (A, C, Site).pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Lynwood HS Modernization (A, C, Site).pdf"
+    },
+    {
+      "name": "Lynwood HS Modernization (D, F)",
+      "slug": "lynwood-hs-modernization-d-f",
+      "split": "in-sample",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Lynwood HS Modernization (D, F).pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Lynwood HS Modernization (D, F).pdf"
+    },
+    {
+      "name": "Lynwood HS Modernization (H, I)",
+      "slug": "lynwood-hs-modernization-h-i",
+      "split": "in-sample",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Lynwood HS Modernization (H, I).pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Lynwood HS Modernization (H, I).pdf"
+    },
+    {
+      "name": "Lynwood HS Modernization (Roof)",
+      "slug": "lynwood-hs-modernization-roof",
+      "split": "in-sample",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Lynwood HS Modernization (Roof).pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Lynwood HS Modernization (Roof).pdf"
+    },
+    {
+      "name": "Music Academy Of The West New Music Education Center",
+      "slug": "music-academy-of-the-west-new-music-education-center",
+      "split": "in-sample",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Music Academy Of The West New Music Education Center.pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_Music Academy Of The West New Music Education Center.pdf"
+    },
+    {
+      "name": "SPE Sinton - Quote",
+      "slug": "spe-sinton-quote",
+      "split": "in-sample",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_SPE Sinton - Quote.pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_SPE Sinton - Quote.pdf"
+    },
+    {
+      "name": "St. Francis Medical Center - IR Conversion HSP",
+      "slug": "st-francis-medical-center-ir-conversion-hsp",
+      "split": "held-out",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_St. Francis Medical Center - IR Conversion HSP.pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_St. Francis Medical Center - IR Conversion HSP.pdf"
+    },
+    {
+      "name": "UT Health East Whitehouse Mechs",
+      "slug": "ut-health-east-whitehouse-mechs",
+      "split": "in-sample",
+      "pdf": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_UT Health East Whitehouse Mechs.pdf",
+      "truth": "C:\\Users\\TriuneTakeoff\\Downloads\\marked pdf\\Takeoff_UT Health East Whitehouse Mechs.pdf"
+    }
+  ]
+}
