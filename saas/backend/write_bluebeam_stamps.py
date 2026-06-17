@@ -127,9 +127,12 @@ def write_stamps(input_pdf: Path, detections_json: Path, output_pdf: Path,
         pno = int(pkey)
         if pno < 0 or pno >= doc.page_count:
             continue
-        # SKIP non-plan pages (schedule, legend, cover, details, etc.).
-        # skipped_non_plan_pages is 1-indexed (PDF page numbers from classifier).
-        if (pno + 1) in skipped_non_plan_pages:
+        # Trust the detector: a page that HAS detections is a plan page, even if
+        # the (text-based) page classifier mislabeled it. Dropping real
+        # detections here produced near-empty Bluebeam PDFs (e.g. 2 written vs
+        # 135 skipped) while the annotated PDF showed everything. So only honor
+        # the non-plan skip for pages that have no detections anyway.
+        if (pno + 1) in skipped_non_plan_pages and not dets:
             n_skipped_by_page_filter += len(dets)
             continue
         page = doc[pno]

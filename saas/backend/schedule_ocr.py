@@ -144,23 +144,29 @@ def assign_to_columns(row: list[dict], col_centers: list[float],
     return out
 
 
+def _score_header_row(row: list[dict]) -> tuple[int, int]:
+    """Score one row as a potential header. Returns (score, tag_col_index)."""
+    score = 0
+    tag_idx = -1
+    for ci, it in enumerate(row):
+        t = it['text'].upper().strip(' :,.-')
+        if t in TAG_HEADER_WORDS:
+            if tag_idx < 0:
+                tag_idx = ci
+            score += 3  # tag header is a strong signal
+        elif any(p in t for p in PROP_HEADER_WORDS):
+            score += 1
+    return score, tag_idx
+
+
 def find_header_row(rows: list[list[dict]]) -> tuple[int, int]:
-    """Find the row that's most likely the header. Returns (row_index, tag_col_index_within_row).
-    Returns (-1, -1) if no header found.
-    """
+    """Find the single best header row. Returns (row_index, tag_col_index_within_row),
+    or (-1, -1) if none. Kept for backward compatibility / single-table pages."""
     best_score = 0
     best_row = -1
     best_tag_idx = -1
     for ri, row in enumerate(rows):
-        score = 0
-        tag_idx = -1
-        for ci, it in enumerate(row):
-            t = it['text'].upper().strip(' :,.-')
-            if t in TAG_HEADER_WORDS:
-                tag_idx = ci
-                score += 3  # tag header is a strong signal
-            elif any(p in t for p in PROP_HEADER_WORDS):
-                score += 1
+        score, tag_idx = _score_header_row(row)
         if score > best_score:
             best_score = score
             best_row = ri
@@ -168,44 +174,70 @@ def find_header_row(rows: list[list[dict]]) -> tuple[int, int]:
     return best_row, best_tag_idx
 
 
-def extract_variables_from_page(pdf_path: Path, page_index: int,
-                                schedule_name: str = '',
-                                dpi: int = 300) -> list[dict]:
-    """OCR + parse a single schedule page. Returns TagVariable-shaped dicts."""
-    img = render_page(pdf_path, page_index, dpi=dpi)
-    items = ocr_page(img)
-    rows = cluster_rows(items)
-    if not rows:
-        return []
+# Minimum header score to start a new schedule block. A real schedule header
+# has a tag column (+3) AND several property columns, so >=4 is conservative.
+HEADER_MIN_SCORE = 4
 
-    header_ri, tag_col_local = find_header_row(rows)
-    if header_ri < 0:
-        return []
 
+def find_all_header_rows(rows: list[list[dict]]) -> list[tuple[int, int]]:
+    """Find EVERY row that looks like a schedule header. Large drawing sheets
+    (E-size) stack multiple schedules vertically — RTU, air devices, ERV,
+    louver, air balance — each with its own header. Returns a list of
+    (row_index, tag_col_index) sorted by row, deduped so two adjacent
+    header-ish rows (wrapped header text) don't both fire."""
+    hits = []
+    for ri, row in enumerate(rows):
+        score, tag_idx = _score_header_row(row)
+        if score >= HEADER_MIN_SCORE:
+            hits.append((ri, score, tag_idx))
+    # Collapse headers that are within 1 row of each other (wrapped header lines):
+    # keep the higher-scoring one.
+    collapsed: list[tuple[int, int]] = []
+    for ri, score, tag_idx in hits:
+        if collapsed and ri - collapsed[-1][0] <= 1:
+            # adjacent to previous header — keep whichever scored higher
+            if score > collapsed[-1][2]:
+                collapsed[-1] = (ri, tag_idx, score)
+        else:
+            collapsed.append((ri, tag_idx, score))
+    return [(ri, tag_idx) for (ri, tag_idx, _score) in collapsed]
+
+
+# Characters EasyOCR commonly confuses inside equipment tags.
+def _normalize_ocr_tag(raw: str) -> str:
+    """Clean an OCR'd tag: uppercase, strip spaces/punctuation. Tags are
+    LETTER(S) + optional dash + DIGITS, so fix digit/letter confusions
+    positionally — 'SOF'->'50F'? No: only fix within the digit run. We keep
+    this conservative: uppercase + strip, and map a trailing lone 'O' inside a
+    numeric run to '0'. Aggressive fixes are left to downstream tag matching."""
+    s = (raw or '').upper().strip()
+    s = s.replace(' ', '').replace(',', '').strip('.:;-')
+    return s
+
+
+def _extract_block(rows: list[list[dict]], header_ri: int, tag_col_local: int,
+                   body_end: int, page_index: int, schedule_name: str) -> list[dict]:
+    """Extract tag-rows for ONE schedule block: rows (header_ri, body_end)."""
     header_row = rows[header_ri]
-    # Get column centers from header positions (more reliable than all rows)
     col_centers = [it['cx'] for it in header_row]
     column_names = [it['text'] for it in header_row]
 
-    # Find the canonical tag column index
+    # Canonical tag column within this block's header
     tag_col_idx = -1
     for i, name in enumerate(column_names):
         if name.upper().strip(' :,.-') in TAG_HEADER_WORDS:
             tag_col_idx = i
             break
+    if tag_col_idx < 0:
+        tag_col_idx = tag_col_local
 
-    variables = []
-    for ri, row in enumerate(rows):
-        if ri <= header_ri:
-            continue
+    out = []
+    for ri in range(header_ri + 1, body_end):
+        row = rows[ri]
         cell_dict = assign_to_columns(row, col_centers, col_tol_px=80)
-        # The tag value is whatever sits in the tag column
         tag_raw = cell_dict.get(tag_col_idx, '').strip()
-        # Validate that this looks like a tag
-        tag_norm = tag_raw.upper().replace(' ', '').replace(',', '')
-        if tag_norm in NON_TAG_WORDS:
-            continue
-        if not TAG_PATTERN.match(tag_norm):
+        tag_norm = _normalize_ocr_tag(tag_raw)
+        if tag_norm in NON_TAG_WORDS or not TAG_PATTERN.match(tag_norm):
             continue
         properties = {}
         for ci, name in enumerate(column_names):
@@ -214,29 +246,227 @@ def extract_variables_from_page(pdf_path: Path, page_index: int,
             val = cell_dict.get(ci, '').strip()
             if val:
                 properties[name.upper()] = val
-
-        variables.append({
+        out.append({
             'tag': tag_norm,
             'schedule_name': schedule_name or f'OCR schedule p{page_index+1}',
             'page': page_index + 1,
             'properties': properties,
             'source_row_index': ri,
-            'inferred_yolo_class': None,    # downstream tag inference can fill this
+            'inferred_yolo_class': None,
             '_source': 'ocr',
             '_conf': sum(it['conf'] for it in row) / max(1, len(row)),
         })
+    return out
 
-    return variables
+
+def extract_variables_from_page(pdf_path: Path, page_index: int,
+                                schedule_name: str = '',
+                                dpi: int = 300,
+                                img=None) -> list[dict]:
+    """OCR + parse a schedule page, handling MULTIPLE stacked schedules per
+    sheet (common on E-size drawings). Returns TagVariable-shaped dicts.
+
+    Pass a pre-rendered ``img`` (numpy RGB) to avoid re-rendering when the
+    caller already has the page raster.
+    """
+    if img is None:
+        img = render_page(pdf_path, page_index, dpi=dpi)
+    items = ocr_page(img)
+    rows = cluster_rows(items)
+    if not rows:
+        return []
+
+    headers = find_all_header_rows(rows)
+    if not headers:
+        # Fall back to single best header (lower bar) for simple pages
+        hri, tci = find_header_row(rows)
+        if hri < 0:
+            return []
+        headers = [(hri, tci)]
+
+    variables: list[dict] = []
+    for idx, (header_ri, tag_col_local) in enumerate(headers):
+        # This block's body ends where the next schedule's header begins.
+        body_end = headers[idx + 1][0] if idx + 1 < len(headers) else len(rows)
+        variables.extend(
+            _extract_block(rows, header_ri, tag_col_local, body_end,
+                           page_index, schedule_name)
+        )
+
+    # Dedup: the same tag can appear if blocks overlap; keep the row with more props.
+    by_tag: dict[str, dict] = {}
+    for v in variables:
+        k = v['tag']
+        if k not in by_tag or len(v['properties']) > len(by_tag[k]['properties']):
+            by_tag[k] = v
+    return list(by_tag.values())
+
+
+# ----------------------------------------------------------------------------
+# Table-region segmentation (Path A) — for dense E-size sheets that pack several
+# schedules (+ a legend column + a notes column) onto one page. Row/column
+# clustering over the whole page scrambles such layouts; instead we detect each
+# ruled table box with OpenCV, then OCR + parse each box independently.
+# ----------------------------------------------------------------------------
+
+def detect_table_regions(img, min_area_frac: float = 0.004,
+                         max_area_frac: float = 0.55) -> list[tuple[int, int, int, int]]:
+    """Detect ruled-table bounding boxes in an RGB page image.
+
+    Returns a list of (x1,y1,x2,y2) pixel boxes, largest first. Empty list if
+    OpenCV is unavailable or no usable grid is found (caller then falls back to
+    whole-page clustering).
+
+    Approach: isolate long H/V rulings, intersect them to find table *joints*
+    (line crossings), then connected-component the joints. A real table has a
+    dense block of joints; the page border (just a rectangle) has only corner
+    joints, so it does not form a block. This separates side-by-side and
+    stacked tables that a naive grid-contour would merge into one blob.
+    """
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return []
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img
+    h, w = gray.shape[:2]
+    page_area = float(h * w)
+    # Simple fixed threshold: dark ink -> white on black. (Adaptive threshold
+    # over-detects on anti-aliased CAD renders — ~60% false ink.)
+    bw = (gray < 128).astype('uint8') * 255
+    # Isolate long horizontal and vertical rulings.
+    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (max(15, w // 45), 1))
+    horiz = cv2.dilate(cv2.erode(bw, hk), hk)
+    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(15, h // 45)))
+    vert = cv2.dilate(cv2.erode(bw, vk), vk)
+    grid = cv2.bitwise_or(horiz, vert)
+    # Close small gaps so each table's rulings form one connected component;
+    # tables separated by whitespace stay separate.
+    grid = cv2.morphologyEx(grid, cv2.MORPH_CLOSE,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11)),
+                            iterations=2)
+    contours, _ = cv2.findContours(grid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = []
+    for c in contours:
+        x, y, ww, hh = cv2.boundingRect(c)
+        area = ww * hh
+        if area < min_area_frac * page_area or area > max_area_frac * page_area:
+            continue
+        if ww < w * 0.05 or hh < h * 0.02:   # too thin to be a table
+            continue
+        pad = int(0.004 * (w + h))   # include outer rulings + nearby labels
+        boxes.append((max(0, x - pad), max(0, y - pad),
+                      min(w, x + ww + pad), min(h, y + hh + pad)))
+    boxes.sort(key=lambda b: (b[3] - b[1]) * (b[2] - b[0]), reverse=True)
+    return boxes
+
+
+def _accept_tag(tag_norm: str, known_tag_col: bool) -> bool:
+    """Whether an OCR'd tag-column value is a real tag. When we KNOW the column
+    is the MARK/TAG column (region-based parsing), accept single-letter marks
+    (A, B, C, D — common for air devices) that the generic pattern rejects."""
+    if not tag_norm:
+        return False
+    if TAG_PATTERN.match(tag_norm):
+        return tag_norm not in NON_TAG_WORDS
+    if known_tag_col:
+        # Single letter, or short letter(+digit) mark inside a confirmed column.
+        if re.match(r'^[A-Z]{1,3}\d{0,3}[A-Z]?$', tag_norm):
+            return True
+    return False
+
+
+def extract_variables_from_region(img, x1: int, y1: int, x2: int, y2: int,
+                                  page_index: int, schedule_name: str = '') -> list[dict]:
+    """OCR + parse ONE cropped table region (clean single-table layout)."""
+    crop = img[y1:y2, x1:x2]
+    items = ocr_page(crop)
+    rows = cluster_rows(items)
+    if not rows:
+        return []
+    header_ri, tag_col_local = find_header_row(rows)
+    if header_ri < 0:
+        return []
+    header_row = rows[header_ri]
+    col_centers = [it['cx'] for it in header_row]
+    column_names = [it['text'] for it in header_row]
+    tag_col_idx = -1
+    for i, name in enumerate(column_names):
+        if name.upper().strip(' :,.-') in TAG_HEADER_WORDS:
+            tag_col_idx = i
+            break
+    known_tag_col = tag_col_idx >= 0
+    if tag_col_idx < 0:
+        tag_col_idx = 0   # leftmost column is the mark column by convention
+
+    out = []
+    for ri in range(header_ri + 1, len(rows)):
+        cell_dict = assign_to_columns(rows[ri], col_centers, col_tol_px=80)
+        tag_norm = _normalize_ocr_tag(cell_dict.get(tag_col_idx, ''))
+        if not _accept_tag(tag_norm, known_tag_col):
+            continue
+        properties = {}
+        for ci, name in enumerate(column_names):
+            if ci == tag_col_idx:
+                continue
+            val = cell_dict.get(ci, '').strip()
+            if val:
+                properties[name.upper()] = val
+        out.append({
+            'tag': tag_norm,
+            'schedule_name': schedule_name or f'OCR region p{page_index+1}',
+            'page': page_index + 1,
+            'properties': properties,
+            'source_row_index': ri,
+            'inferred_yolo_class': None,
+            '_source': 'ocr_region',
+            '_conf': sum(it['conf'] for it in rows[ri]) / max(1, len(rows[ri])),
+        })
+    return out
+
+
+def extract_variables_region_based(pdf_path: Path, page_index: int,
+                                   dpi: int = 200, img=None) -> list[dict]:
+    """Segment a page into ruled-table regions and parse each independently.
+    Returns [] if no usable table regions were detected (caller falls back)."""
+    if img is None:
+        img = render_page(pdf_path, page_index, dpi=dpi)
+    regions = detect_table_regions(img)
+    if not regions:
+        return []
+    all_vars: list[dict] = []
+    for (x1, y1, x2, y2) in regions:
+        try:
+            all_vars.extend(
+                extract_variables_from_region(img, x1, y1, x2, y2, page_index)
+            )
+        except Exception as e:
+            print(f'[schedule_ocr] region ({x1},{y1},{x2},{y2}) failed: {e}')
+    # Dedup by tag, keep richest row.
+    by_tag: dict[str, dict] = {}
+    for v in all_vars:
+        k = v['tag']
+        if k not in by_tag or len(v['properties']) > len(by_tag[k]['properties']):
+            by_tag[k] = v
+    return list(by_tag.values())
 
 
 def extract_all_schedules(pdf_path: Path,
                           schedule_page_nums: list[int],
                           dpi: int = 300) -> list[dict]:
-    """Run OCR on every page identified as a schedule, return aggregated variables."""
+    """Run OCR on every candidate schedule page, return aggregated variables.
+
+    Strategy per page: render once, try table-region segmentation first (best
+    for dense multi-schedule sheets); if that yields nothing, fall back to
+    whole-page multi-block clustering.
+    """
     out = []
     for p in schedule_page_nums:
         try:
-            vars_ = extract_variables_from_page(pdf_path, p - 1, dpi=dpi)
+            img = render_page(pdf_path, p - 1, dpi=dpi)
+            vars_ = extract_variables_region_based(pdf_path, p - 1, dpi=dpi, img=img)
+            if not vars_:
+                vars_ = extract_variables_from_page(pdf_path, p - 1, dpi=dpi, img=img)
             out.extend(vars_)
         except Exception as e:
             print(f'[schedule_ocr] page {p}: {e}')

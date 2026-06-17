@@ -40,7 +40,7 @@ from schedule_parser import parse_pdf_schedules, dump_variables
 DEFAULT_MODEL = 'models/hvac_yolov8s_v10.pt'
 DPI = 200
 TILE_SIZE = 640
-TILE_OVERLAP = 100
+TILE_OVERLAP = 160   # match training tiling (train_yolo.py) so seam-straddling symbols aren't missed
 NMS_DIST = 50
 DEFAULT_CONF = 0.4
 
@@ -525,7 +525,7 @@ def run_inference(model, img, conf=DEFAULT_CONF):
             xs, ys = max(0, xe - TILE_SIZE), max(0, ye - TILE_SIZE)
             tile = img[ys:ye, xs:xe]
             gray = cv2.cvtColor(tile, cv2.COLOR_BGR2GRAY)
-            if (gray < 200).mean() < 0.005:
+            if (gray < 200).mean() < 0.001:   # skip only near-blank tiles (was 0.005 — dropped sparse light-line CAD)
                 continue
             if tile.shape[0] < TILE_SIZE or tile.shape[1] < TILE_SIZE:
                 p = np.ones((TILE_SIZE, TILE_SIZE, 3), dtype=np.uint8) * 255
@@ -1275,6 +1275,38 @@ def main():
         print(f"  Schedule parse failed: {e}")
         schedules, marks, mark_details = [], [], {}
 
+    # OCR fallback: when the text-layer parser found no variables (e.g. a
+    # CAD-exported PDF with broken/non-extractable font encoding), read the
+    # schedule from the rendered pixels instead. The OCR module lives in
+    # saas/backend; import it lazily so the CLI has no hard EasyOCR dependency.
+    if not variables and not getattr(args, 'no_schedule_ocr', False):
+        try:
+            import sys as _sys
+            _ocr_dir = Path(__file__).resolve().parent / 'saas' / 'backend'
+            if _ocr_dir.is_dir() and str(_ocr_dir) not in _sys.path:
+                _sys.path.insert(0, str(_ocr_dir))
+            from schedule_ocr import extract_all_schedules as _ocr_sched
+            if cached_m_series_pages:
+                # cached_m_series_pages are 0-based page indices; schedule_ocr
+                # expects 1-based page numbers.
+                ocr_pages = [p + 1 for p in cached_m_series_pages][:8]
+            else:
+                import fitz as _fitz
+                _d = _fitz.open(str(pdf_path)); _n = _d.page_count; _d.close()
+                ocr_pages = list(range(1, min(_n, 8) + 1))
+            print(f"  Text-layer schedule empty; trying OCR fallback on pages {ocr_pages}...")
+            ocr_vars = _ocr_sched(str(pdf_path), ocr_pages, dpi=200)
+            if ocr_vars:
+                variables = ocr_vars
+                marks = sorted({v.get('tag') for v in variables if v.get('tag')})
+                print(f"  OCR recovered {len(variables)} schedule variable(s): "
+                      f"{marks[:10]}{'...' if len(marks) > 10 else ''}")
+            else:
+                print("  OCR fallback recovered 0 variables "
+                      "(table reconstruction failed on this sheet)")
+        except Exception as _e:
+            print(f"  OCR fallback unavailable/failed: {_e}")
+
     # Always write variables JSON sidecar
     variables_path = out_dir / f"{pdf_path.stem}_variables.json"
     try:
@@ -1421,7 +1453,10 @@ def main():
         try:
             from class_normalization import normalize_class as _norm
             from collections import Counter as _Counter
-            FORCE_KEEP_CONF = 0.85
+            # High-confidence detections survive even if their class isn't in the
+            # (often partially-parsed) schedule. Lowered 0.85→0.60: a partial
+            # schedule was suppressing valid detections worse than no schedule.
+            FORCE_KEEP_CONF = 0.60
             valid_classes = {
                 _norm(v.get('inferred_yolo_class') or '')
                 for v in variables if v.get('inferred_yolo_class')

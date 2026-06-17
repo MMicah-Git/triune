@@ -33,6 +33,12 @@ from pathlib import Path
 import fitz  # PyMuPDF
 
 from class_normalization import normalize_class
+from v10_class_map import V10_CLASSES, map_subject
+
+# Canonical class -> fixed index, matching the model head order. ALL training
+# labels must use this index space so corrections line up with the base dataset
+# and the model being fine-tuned.
+V10_INDEX = {c: i for i, c in enumerate(V10_CLASSES)}
 
 
 # Subjects we filter out — annotations that are not equipment counts
@@ -153,13 +159,20 @@ def process_project(markup_pdf: Path, project_name: str, output_dir: Path,
 
     src_pdf = source_pdf or markup_pdf
 
-    class_index = ClassIndex(output_dir / 'classes.txt')
-
     by_page = defaultdict(list)
     class_counter = Counter()
+    dropped_counter = Counter()
     for a in extract_annotations(markup_pdf):
+        # Map the RAW Bluebeam subject onto the canonical 33-class v10 taxonomy
+        # and stamp a FIXED index. Boxes with no sensible home are dropped.
+        v10cls = map_subject(a.get('subclass') or a.get('class'))
+        if v10cls is None or v10cls not in V10_INDEX:
+            dropped_counter[a.get('subclass') or a.get('class') or '?'] += 1
+            continue
+        a['v10_class'] = v10cls
+        a['v10_index'] = V10_INDEX[v10cls]
         by_page[a['page']].append(a)
-        class_counter[a['class']] += 1
+        class_counter[v10cls] += 1
 
     if not by_page:
         return {'project': project_name, 'pages': 0, 'boxes': 0, 'classes': {}}
@@ -184,7 +197,7 @@ def process_project(markup_pdf: Path, project_name: str, output_dir: Path,
 
             lines = []
             for a in by_page[page_num]:
-                cid = class_index.get_or_create(a['class'])
+                cid = a['v10_index']   # fixed canonical index
                 lines.append(yolo_label_line(cid, a['rect_pdf'], (pw_pdf, ph_pdf)))
 
                 with jsonl_path.open('a', encoding='utf-8') as f:
@@ -200,13 +213,15 @@ def process_project(markup_pdf: Path, project_name: str, output_dir: Path,
     finally:
         src_doc.close()
 
-    class_index.save()
+    # Always write the canonical 33-class list — never a per-file grown index.
+    (output_dir / 'classes.txt').write_text('\n'.join(V10_CLASSES) + '\n', encoding='utf-8')
 
     return {
         'project': project_name,
         'pages': len(by_page),
         'boxes': sum(len(v) for v in by_page.values()),
         'classes': dict(class_counter),
+        'dropped': dict(dropped_counter),
     }
 
 

@@ -75,9 +75,16 @@ CLASS_CONF: dict[str, float] = {
 def threshold_for(class_name: str, default: float = DEFAULT_CONF) -> float:
     """Return the confidence threshold to use for a given YOLO class name.
 
-    Applies the same normalization the training pipeline uses, so
-    'FANS' → 'FAN', 'AD-LINEAR PLENUM 1" SLOT' → 'AD-LINEAR PLENUM', etc.
+    Looks up the model's RAW class name first — the YOLO head emits names like
+    'VAV', 'CONDENSING UNIT', 'SPLIT SYSTEM' that ``normalize_class`` (built for
+    a different reduced taxonomy) would remap to the wrong bucket
+    (e.g. VAV → 'OTHER MECHANICAL' → 0.40 instead of its tuned 0.30). Only when
+    the raw name isn't tuned do we fall back to the normalized name, so we still
+    get 'FANS' → 'FAN', 'AD-LINEAR PLENUM 1" SLOT' → 'AD-LINEAR PLENUM', etc.
     """
+    raw = (class_name or '').upper().strip()
+    if raw in CLASS_CONF:
+        return CLASS_CONF[raw]
     canonical = normalize_class(class_name or '')
     return CLASS_CONF.get(canonical, default)
 

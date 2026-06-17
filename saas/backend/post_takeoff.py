@@ -51,26 +51,57 @@ def _save_json(p: Path, obj):
     p.write_text(json.dumps(obj, indent=2, default=str), encoding='utf-8')
 
 
+# Page types (in priority order) where a schedule is likely to live. Schedules
+# on dense drawing sets routinely get misclassified, so we cast a wide net —
+# OCR is only attempted when the text-layer parser already returned nothing.
+_OCR_PAGE_TYPE_PRIORITY = [
+    'schedule', 'air_balance', 'legend', 'details', 'cover', 'notes',
+]
+# Cap how many pages we OCR — each big sheet is ~30-60s on CPU.
+_OCR_MAX_PAGES = 8
+
+
+def _ocr_candidate_pages(classifications: list) -> list[int]:
+    """Ordered, deduped list of pages worth OCRing for a schedule.
+    Prioritized by classified type, then any remaining plan pages (some sets
+    embed the schedule on the floor-plan sheet)."""
+    seen: set[int] = set()
+    ordered: list[int] = []
+    by_type: dict[str, list[int]] = {}
+    for c in classifications:
+        by_type.setdefault(c.type, []).append(c.page)
+    for t in _OCR_PAGE_TYPE_PRIORITY:
+        for p in by_type.get(t, []):
+            if p not in seen:
+                seen.add(p); ordered.append(p)
+    for c in classifications:           # plan pages last
+        if c.is_plan and c.page not in seen:
+            seen.add(c.page); ordered.append(c.page)
+    return ordered[:_OCR_MAX_PAGES]
+
+
 def _maybe_schedule_ocr(pdf_path: Path, classifications: list, variables: list) -> list:
-    """Run OCR fallback when variables list is empty. Tries:
-      1. Pages classified as 'schedule'
-      2. Then mechanical_plan pages too — some drawings embed the schedule
-         on the same page as the floor plan (Art Vascular style).
+    """Run OCR fallback when the text-layer parser returned no variables.
+
+    Casts a wide net over likely schedule pages (schedule / air_balance /
+    legend / details / cover / notes, then plans) because schedules on dense
+    or broken-font drawing sets are frequently misclassified. OCR only runs
+    when ``variables`` is empty, so it never overrides good text-layer data.
     """
     if variables:
         return variables
-    schedule_pages = [c.page for c in classifications if c.type == 'schedule']
-    plan_pages = [c.page for c in classifications if c.is_plan]
-    # Try schedule pages first, fall through to plan pages
-    candidate_pages = schedule_pages + [p for p in plan_pages if p not in schedule_pages]
+    candidate_pages = _ocr_candidate_pages(classifications)
     if not candidate_pages:
         return variables
     print(f'[post_takeoff] variables empty; running OCR fallback on pages {candidate_pages}')
     try:
         from schedule_ocr import extract_all_schedules
-        ocr_vars = extract_all_schedules(pdf_path, candidate_pages, dpi=300)
+        ocr_vars = extract_all_schedules(pdf_path, candidate_pages, dpi=200)
         if ocr_vars:
             print(f'[post_takeoff] OCR fallback recovered {len(ocr_vars)} variables')
+        else:
+            print('[post_takeoff] OCR fallback recovered 0 variables '
+                  '(non-extractable text layer + OCR could not reconstruct tables)')
         return ocr_vars
     except Exception as e:
         print(f'[post_takeoff] OCR fallback failed: {e}')

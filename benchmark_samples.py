@@ -141,9 +141,11 @@ def read_takeoff_xlsx(path):
     except Exception as e:
         return [], f'open_failed: {e}'
 
-    # Prefer a flat data sheet
+    # Prefer the TAGGED takeoff sheet. Our output's 'Triune Takeoff' and the
+    # team's 'TAKEOFF' carry per-tag rows; 'RawData'/'DATA' is the flat untagged
+    # YOLO dump — reading it first discarded all our tags and forced tag_recall=0.
     sheet = None
-    for pref in ('DATA', 'RawData', 'TAKEOFF', 'Triune Takeoff'):
+    for pref in ('Triune Takeoff', 'TAKEOFF', 'TO', 'DATA', 'RawData'):
         if pref in wb.sheetnames:
             sheet = wb[pref]
             break
@@ -224,6 +226,18 @@ def aggregate_by_product_tag(rows):
     return dict(out)
 
 
+def aggregate_by_tag(rows):
+    """Aggregate by TAG only (ignore product label). The team and our pipeline
+    label the same equipment differently (e.g. 'FAN' vs 'EXHAUST FAN'), so the
+    (product, tag) tuple zeroes matches even when tags are identical. This
+    tag-only view measures whether the tag itself was found."""
+    out = defaultdict(int)
+    for r in rows:
+        if r['tag']:
+            out[r['tag']] += r['qty']
+    return dict(out)
+
+
 # ─── Scoring ───────────────────────────────────────────────────────────────
 
 def _overlap_score(team, ours):
@@ -248,15 +262,23 @@ def score_project(team_rows, our_rows):
     our_pt  = aggregate_by_product_tag(our_rows)
     t_recall, t_prec, t_match = _overlap_score(team_pt, our_pt)
 
+    # Tag-only (product-label-independent) — the honest measure of tag matching.
+    team_t = aggregate_by_tag(team_rows)
+    our_t  = aggregate_by_tag(our_rows)
+    to_recall, to_prec, to_match = _overlap_score(team_t, our_t)
+
     return {
         'team_total': sum(team_p.values()),
         'our_total':  sum(our_p.values()),
         'product_recall':    p_recall,
         'product_precision': p_prec,
         'product_match':     p_match,
-        'tag_recall':    t_recall,
+        'tag_recall':    t_recall,        # strict: (product, tag) tuple
         'tag_precision': t_prec,
         'tag_match':     t_match,
+        'tag_only_recall':    to_recall,  # lenient: tag string only
+        'tag_only_precision': to_prec,
+        'tag_only_match':     to_match,
         'team_products': team_p,
         'our_products':  our_p,
     }

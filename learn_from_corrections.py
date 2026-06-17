@@ -47,7 +47,52 @@ from datetime import datetime, timezone
 REPO_ROOT = Path(__file__).resolve().parent
 SAAS_DATA = REPO_ROOT / 'saas' / 'data'
 DEFAULT_QUEUE = SAAS_DATA / 'training_queue.jsonl'
-DEFAULT_BASE_DATASET = REPO_ROOT / 'yolo_dataset_v11'
+# Base must share the model-head taxonomy. v14 is the 33-class v10-order dataset;
+# v11 was 25-class with a different order (mixing it corrupts training).
+DEFAULT_BASE_DATASET = REPO_ROOT / 'yolo_dataset_v14'
+
+sys.path.insert(0, str(REPO_ROOT))
+from v10_class_map import V10_CLASSES, map_subject  # noqa: E402
+
+# Canonical class -> fixed index (model-head order). The ONE source of truth.
+V10_INDEX = {c: i for i, c in enumerate(V10_CLASSES)}
+
+
+def _read_classes(p: Path) -> list[str] | None:
+    if not p or not p.exists():
+        return None
+    return [c.strip() for c in p.read_text(encoding='utf-8').splitlines() if c.strip()]
+
+
+def _canonical_index_map(src_classes: list[str]) -> dict[int, int | None]:
+    """Map each source class index -> canonical V10 index (None = drop)."""
+    out: dict[int, int | None] = {}
+    for i, name in enumerate(src_classes):
+        canon = name if name in V10_INDEX else map_subject(name)
+        out[i] = V10_INDEX.get(canon) if canon else None
+    return out
+
+
+def _remap_label_file(path: Path, idxmap: dict[int, int | None]) -> int:
+    """Rewrite a YOLO label file's class indices into canonical V10 order.
+    Drops lines whose class maps to None. Returns # lines kept."""
+    kept = []
+    for ln in path.read_text(encoding='utf-8').splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        parts = ln.split()
+        try:
+            ci = int(parts[0])
+        except (ValueError, IndexError):
+            continue
+        new = idxmap.get(ci)
+        if new is None:
+            continue
+        parts[0] = str(new)
+        kept.append(' '.join(parts))
+    path.write_text('\n'.join(kept) + ('\n' if kept else ''), encoding='utf-8')
+    return len(kept)
 
 
 def _load_queue(queue_path: Path) -> list[dict]:
@@ -66,29 +111,36 @@ def _load_queue(queue_path: Path) -> list[dict]:
 
 
 def _copy_dataset(src: Path, dst: Path) -> tuple[int, int]:
-    """Copy the base dataset's images + labels into dst. Skip class_index
-    files — we'll rebuild those from the merged class list later."""
+    """Copy the base dataset's images + labels into dst (flattening any
+    images/train, images/val split — prepare_training.py re-splits later).
+    Remaps base labels into canonical V10 order if the base uses a different
+    taxonomy, and always writes the canonical classes.txt."""
     if not src.exists():
         raise FileNotFoundError(f'base dataset not found: {src}')
     (dst / 'images').mkdir(parents=True, exist_ok=True)
     (dst / 'labels').mkdir(parents=True, exist_ok=True)
     n_images = n_labels = 0
-    src_images = src / 'images'
-    src_labels = src / 'labels'
-    if src_images.exists():
-        for f in src_images.iterdir():
-            if f.is_file():
-                shutil.copy2(f, dst / 'images' / f.name)
-                n_images += 1
-    if src_labels.exists():
-        for f in src_labels.iterdir():
-            if f.is_file():
-                shutil.copy2(f, dst / 'labels' / f.name)
-                n_labels += 1
-    # Copy classes.txt as the starting point
-    cls_src = src / 'classes.txt'
-    if cls_src.exists():
-        shutil.copy2(cls_src, dst / 'classes.txt')
+    # Walk recursively so flat AND train/val layouts both work.
+    for f in (src / 'images').rglob('*'):
+        if f.is_file() and f.suffix.lower() in ('.png', '.jpg', '.jpeg'):
+            shutil.copy2(f, dst / 'images' / f.name)
+            n_images += 1
+    for f in (src / 'labels').rglob('*'):
+        if f.is_file() and f.suffix.lower() == '.txt':
+            shutil.copy2(f, dst / 'labels' / f.name)
+            n_labels += 1
+
+    # Guard: if the base taxonomy doesn't match the model head, remap its labels.
+    base_classes = _read_classes(src / 'classes.txt')
+    if base_classes and base_classes != V10_CLASSES:
+        print(f'  WARNING: base dataset classes.txt ({len(base_classes)} classes) '
+              f'!= model taxonomy ({len(V10_CLASSES)}); remapping base labels.')
+        idxmap = _canonical_index_map(base_classes)
+        for lf in (dst / 'labels').glob('*.txt'):
+            _remap_label_file(lf, idxmap)
+
+    # Always anchor the merged dataset to the canonical 33-class list.
+    (dst / 'classes.txt').write_text('\n'.join(V10_CLASSES) + '\n', encoding='utf-8')
     return n_images, n_labels
 
 
@@ -106,29 +158,30 @@ def _merge_correction(rec: dict, dst: Path) -> tuple[bool, str]:
     if not img_dir.is_dir() or not lbl_dir.is_dir():
         return False, f'correction missing images/ or labels/ at {yolo_dir}'
 
+    # Build the correction's own index->canonical-index map. Corrections store
+    # labels indexed against THEIR OWN classes.txt (per-file order for legacy
+    # Bluebeam corrections, or model order for in-UI ones). We must translate
+    # those integers into the canonical V10 order — copying them verbatim is the
+    # taxonomy-corruption bug.
+    corr_classes = _read_classes(yolo_dir / 'classes.txt')
+    if not corr_classes:
+        return False, f'correction has no classes.txt: {yolo_dir}'
+    idxmap = _canonical_index_map(corr_classes)
+
     for f in img_dir.iterdir():
         if f.is_file():
             shutil.copy2(f, dst / 'images' / f.name)
             n_images_added += 1
+    kept_total = 0
     for f in lbl_dir.iterdir():
-        if f.is_file():
-            shutil.copy2(f, dst / 'labels' / f.name)
+        if f.is_file() and f.suffix.lower() == '.txt':
+            dst_lbl = dst / 'labels' / f.name
+            shutil.copy2(f, dst_lbl)
+            kept_total += _remap_label_file(dst_lbl, idxmap)   # rewrite to canonical indices
             n_labels_added += 1
 
-    # If correction has its own classes.txt, merge into dst/classes.txt
-    correction_classes = yolo_dir / 'classes.txt'
-    if correction_classes.exists():
-        existing = []
-        merged_path = dst / 'classes.txt'
-        if merged_path.exists():
-            existing = [c.strip() for c in merged_path.read_text(encoding='utf-8').splitlines() if c.strip()]
-        for cls in correction_classes.read_text(encoding='utf-8').splitlines():
-            cls = cls.strip()
-            if cls and cls not in existing:
-                existing.append(cls)
-        merged_path.write_text('\n'.join(existing) + '\n', encoding='utf-8')
-
-    return True, f'+{n_images_added} images, +{n_labels_added} labels'
+    # dst/classes.txt is the canonical list (set in _copy_dataset) — never grown.
+    return True, f'+{n_images_added} images, +{n_labels_added} labels ({kept_total} boxes, canonical-remapped)'
 
 
 def main():
@@ -136,7 +189,7 @@ def main():
     ap.add_argument('--queue', default=str(DEFAULT_QUEUE),
                     help='Training queue JSONL (default: saas/data/training_queue.jsonl)')
     ap.add_argument('--base-dataset', default=str(DEFAULT_BASE_DATASET),
-                    help='Base training dataset (default: yolo_dataset_v11)')
+                    help='Base training dataset (default: yolo_dataset_v14, 33-class v10 order)')
     ap.add_argument('--next-version', default=None,
                     help='Name for the new dataset (default: v12, v13, …)')
     ap.add_argument('--no-zip', action='store_true',
@@ -175,8 +228,16 @@ def main():
     n_base_img, n_base_lbl = _copy_dataset(base_dataset, dst_dataset)
     print(f'  base: {n_base_img} images, {n_base_lbl} labels')
 
-    # 2. Merge corrections from queue
-    queue = _load_queue(queue_path)
+    # 2. Merge corrections from queue (dedup re-submissions of the same
+    #    correction — the in-UI endpoint appends a new line each submit, so the
+    #    same yolo_dir can appear multiple times. Keep the last.)
+    raw_queue = _load_queue(queue_path)
+    _by_dir = {}
+    for rec in raw_queue:
+        _by_dir[rec.get('yolo_dir')] = rec
+    queue = list(_by_dir.values())
+    if len(queue) != len(raw_queue):
+        print(f'\nDeduped {len(raw_queue)} queue lines -> {len(queue)} unique correction(s).')
     print(f'\nFound {len(queue)} correction(s) in training queue.')
     if not queue:
         print('  (Nothing to merge. New corrections show up in saas/data/training_queue.jsonl '
@@ -186,7 +247,7 @@ def main():
     successful = skipped = 0
     for i, rec in enumerate(queue, 1):
         ok, msg = _merge_correction(rec, dst_dataset)
-        flag = ' ✓ ' if ok else ' SKIP '
+        flag = ' OK  ' if ok else ' SKIP '
         print(f'  [{i:>3d}/{len(queue)}] {flag} {rec.get("project_slug","?")[:50]:50s}  {msg}')
         if ok:
             successful += 1

@@ -37,6 +37,7 @@ RED_DAMPER      = '1 0 0'                        # Damper family
 BLUE_CAP        = '0 0.5019608 1'                # Caps / hoods / outdoor units
 ORANGE_EQUIP    = '1 0.5019608 0'                # Louvers, sensors, heaters, ERVs, condensers
 PURPLE_INDOOR   = '0.5019608 0 1'                # Fan coil / VAV / duct silencer / indoor units
+GRAY_FALLBACK   = '0.5 0.5 0.5'                  # any AI class without a curated toolbox subject
 
 
 # (ai_class) -> (toolbox_subject, color, confidence, note)
@@ -87,6 +88,21 @@ AI_TO_TOOLBOX = {
     'AIR HANDLING UNIT':            ('FAN COIL UNIT',         PURPLE_INDOOR, 'MEDIUM', 'AHU; closest toolbox match is fan coil'),
     'HUMIDIFIER':                   ('HUMIDIFIER',            PURPLE_INDOOR, 'HIGH',   'Direct — was in TOOLBOX_NOT_IN_AI, now AI predicts via text-layer'),
 
+    # ---- v10 model-native classes the old (v11-era) table missed ----
+    'VAV':                          ('SINGLE DUCT VAV BOX',   PURPLE_INDOOR, 'MEDIUM', 'VAV terminal box'),
+    'VRF':                          ('VRF FAN COIL UNIT',     ORANGE_EQUIP,  'MEDIUM', 'VRF unit (toolbox color: orange); estimator re-classes indoor/outdoor'),
+    'SPLIT SYSTEM':                 ('FAN COIL UNIT',         PURPLE_INDOOR, 'MEDIUM', 'Split system indoor ~ fan coil'),
+    'SPLIT SYSTEM HEAT PUMP':       ('CONDENSER UNIT',        ORANGE_EQUIP,  'MEDIUM', 'Split HP outdoor ~ condenser'),
+    'PTAC':                         ('FAN COIL UNIT',         PURPLE_INDOOR, 'MEDIUM', 'PTAC ~ fan coil'),
+    'HEATER':                       ('ELECTRIC HEATERS',      ORANGE_EQUIP,  'MEDIUM', 'Generic heater'),
+    'HOOD':                         ('ROOF HOOD',             BLUE_CAP,      'MEDIUM', 'Hood'),
+    'DESTRATIFICATION FAN':         ('FAN',                   BLUE_FAN_1,    'MEDIUM', 'Destratification fan ~ FAN'),
+    'JET VENT FAN':                 ('FAN',                   BLUE_FAN_2,    'MEDIUM', 'Jet/vent fan ~ FAN'),
+    'INLINE DAMPER':               ('MANUAL VOLUME DAMPER',  RED_DAMPER,    'MEDIUM', 'Inline damper ~ volume damper'),
+    'DAMPER WITH TAP':              ('MANUAL VOLUME DAMPER',  RED_DAMPER,    'MEDIUM', 'Damper with tap ~ volume damper'),
+    'AD-MISC/LINEAR':               ('AD-GRD',                YELLOW,        'LOW',    'Linear/misc diffuser; emit as AD-GRD'),
+    'HIGH EFFICENCY TAKE-OFF':      ('HIGH EFFICENCY TAKE-OFF', RED_DAMPER,  'MEDIUM', 'Duct take-off fitting (toolbox color: red)'),
+
     # ---- Catch-all ----
     'OTHER MECHANICAL':             (None,                    None,          'LOW',    'No good toolbox match — skip emitting'),
 }
@@ -136,7 +152,14 @@ def map_ai_class(ai_class: str):
     """
     if ai_class in AI_TO_TOOLBOX:
         return AI_TO_TOOLBOX[ai_class]
-    return (None, None, 'UNMAPPED', f'AI class {ai_class!r} not in mapping table')
+    # Fallback: never silently drop a real detection. Stamp it with its own
+    # class name + a neutral color so it shows in Bluebeam's Markups List (the
+    # estimator can re-class or delete it). Matches the annotated PDF, which
+    # draws every detection regardless of mapping.
+    if ai_class:
+        return (ai_class, GRAY_FALLBACK, 'FALLBACK',
+                f'AI class {ai_class!r} not curated — stamped with class name')
+    return (None, None, 'UNMAPPED', 'empty AI class')
 
 
 if __name__ == '__main__':
