@@ -141,6 +141,16 @@ Tools built + validated (dry-run):
 
 This is the real fix for the true-misses (RTU/FSD/relief hood/gas heater) that Track A can't address.
 
+### OUTCOME (2026-06-21) — flywheel ran a full lap; v10 stays
+First real retrain trained on the SMALL v19xs backup (2,500 tiles — air-device tiles subsampled to fit
+the upload). `gate_track_a.py`: v19 F1 0.843 (recall 0.743, prec 0.974) vs v10 0.889. `gate_sweep.py`
+(threshold tuning, no retrain): v19's best is F1 **0.861 @ conf 0.30** — still below 0.889. So **KEEP v10**;
+it remains production (config default `hvac_yolov8s_v10.pt`). The gate worked exactly as designed — it
+refused to ship a model that wasn't better. v19 kept at `models/hvac_yolov8s_v19.pt` (not deployed).
+**To actually beat v10:** retrain on the FULL v19 (46k tiles) or v19s (10k) — they keep all air-device
+examples, so recall recovers; the small backup traded recall (the gate's main metric) for precision.
+Decision for the Titus presentation: ship v10 (proven best); do the bigger retrain afterward.
+
 ### Track B — FIRST MINE DONE (2026-06-20)
 Started OneDrive + hydrated a sample; `build_track_b.py` mined **105 projects → 18,814 tiles**
 (`yolo_dataset_v18_tiled`, 1.7 GB). Miss classes now LEARNABLE (vs ~6 each before):
