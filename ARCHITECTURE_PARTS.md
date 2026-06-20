@@ -115,7 +115,10 @@ items + tag report.
   readable in the text layer. Two bugs: (a) schedule-page *location* is wrong, (b) OCR fallback
   has no "is this actually a schedule row?" guard.
 - Dense E-size multi-schedule sheets not fully parsed (table-region segmentation scaffolded only).
-- Tag join is exact-match; `EF1` vs `EF-1` variants not normalized.
+- ~~Tag join is exact-match; `EF1` vs `EF-1` variants not normalized.~~ **FIXED 2026-06-21** —
+  `canonical_tag()` separator-insensitive join (see progress log).
+- Broken-font / foreign schedules (CityVet Buckeye) still parse to junk tags
+  (`R-6-COHPRESSED`, `IL4-X-RAT`) — needs a fallback parser (Camelot/docTR/VLM). Only open Part-3 item.
 
 **Improvement workflow (mostly NOT training):**
 - `schedule_regression_sweep.py` — corpus-wide snapshot diff after every parser change.
@@ -200,6 +203,20 @@ reports its empty schedule honestly (it's a partial export with no schedule shee
 - ✅ phantom thresholds (`class_thresholds.py`): DAMPER WITH TAP 0.55, OTHER MECHANICAL 0.40→0.50.
 - ⚠️ v14 broken (held-out recall 0) — keep v10. Data ceiling: fine mounting subtype only recoverable
   when the schedule is descriptive (else needs a model→type lookup).
+
+**2026-06-21 — Part 3 CLOSED (extraction & reconciliation healthy):**
+- ✅ `canonical_tag()` in `schedule_parser.py` — separator-insensitive tag matching (`EF1` == `EF-1`).
+  Wired into the tag→specs join (`takeoff_cli.py` Excel, both sheets) and all of reconciliation
+  (`validation_engine.py`: `missing_on_plan`, `orphan_tags`, `tag_presence`, per-class `missing_tags`).
+  Originals preserved for display.
+- ✅ `post_takeoff.py` OCR garbage guard (`_filter_ocr_noise`) — no more noise tags from raster OCR.
+- ✅ `part3_diagnostic.py` — reuses on-disk job outputs, runs `reconcile()` over 19 jobs, buckets by
+  failure mode. **Verdict: Part-3 logic is correct.** Orphan tags 1/19 (a genuine not-in-schedule
+  case, not a format bug); **0 pad/separator-recoverable misses** across every offender.
+- The remaining red in the diagnostic is NOT Part 3: `MISSING` (11 jobs) = Part-2 detection gaps
+  (RTUs/EFs/ERVs under-detected); `NO_SCHEDULE` (8) = mostly correct partial plan-only exports +
+  CityVet broken-font. The accuracy ceiling now lives in **Part 2 detection recall**, not reconciliation.
+- Backend restarted with all Part-3 fixes live; stuck-job watchdog ran on startup.
 
 **Next (not yet done):**
 - Part 2: close the correction→retrain→gate→deploy flywheel for true-miss classes (ROOFTOP UNIT,
