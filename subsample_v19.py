@@ -13,9 +13,10 @@ from collections import Counter
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / 'yolo_dataset_v19_tiled'
-OUT = ROOT / 'yolo_dataset_v19s_tiled'
-TARGET_TILES = 10000
-THIN_MAX = 700           # classes with fewer total boxes than this => keep all their tiles
+# args: [target_tiles] [out_dir] [thin_max]
+TARGET_TILES = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
+OUT = ROOT / (sys.argv[2] if len(sys.argv) > 2 else 'yolo_dataset_v19s_tiled')
+THIN_MAX = int(sys.argv[3]) if len(sys.argv) > 3 else 700  # classes < this => keep all their tiles
 random.seed(42)
 
 CLASSES = [c for c in (SRC / 'classes.txt').read_text(encoding='utf-8').splitlines() if c.strip()]
