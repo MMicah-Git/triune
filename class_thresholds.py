@@ -39,6 +39,7 @@ CLASS_CONF: dict[str, float] = {
     'AD-T-BAR RETURN':      0.45,
     'MANUAL VOLUME DAMPER': 0.50,   # often confused with duct fittings
     'DAMPER':               0.50,
+    'DAMPER WITH TAP':      0.55,   # pure false-positives in the benchmark (0 truth, 19 preds)
     'MOTORIZED DAMPER':     0.50,
 
     # ----- Visually distinct classes — LOWER threshold (free recall) -----
@@ -68,7 +69,7 @@ CLASS_CONF: dict[str, float] = {
     'AD-LINEAR':                0.40,
 
     # ----- Catch-all -----
-    'OTHER MECHANICAL':     0.40,
+    'OTHER MECHANICAL':     0.50,   # over-fires (2 truth, 11 preds) — raise to cut noise
 }
 
 

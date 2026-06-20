@@ -80,3 +80,28 @@ def list_jobs() -> list[dict]:
     jobs = list(_read()['jobs'].values())
     jobs.sort(key=lambda j: j.get('created_at', ''), reverse=True)
     return jobs
+
+
+def reap_stale_jobs() -> list[str]:
+    """Mark any job still 'running'/'queued' as failed.
+
+    Jobs run in-process via FastAPI BackgroundTasks, so they die with the
+    process. After a restart (or an OOM kill — see the E-size memory issue) a
+    job left in 'running' would spin forever in the UI. Called on startup to
+    flip those to 'error' so the user sees an honest failure and can re-run.
+    Returns the list of reaped job ids.
+    """
+    reaped = []
+    with _lock:
+        data = _read()
+        for job_id, job in data['jobs'].items():
+            if job.get('status') in ('running', 'queued'):
+                job['status'] = 'error'
+                job['finished_at'] = _now()
+                job['error'] = (job.get('error') or
+                    'Interrupted — the backend stopped while this job was running '
+                    '(commonly an out-of-memory kill on large drawing sets). Re-run the job.')
+                reaped.append(job_id)
+        if reaped:
+            _write(data)
+    return reaped

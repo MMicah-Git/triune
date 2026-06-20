@@ -27,6 +27,7 @@ from collections import defaultdict
 import fitz
 import cv2
 import numpy as np
+from collections import OrderedDict
 
 from tag_extractor import summarize_detections_by_tag
 from tag_inference import infer_tags
@@ -484,6 +485,55 @@ def render_page(pdf_path, page_idx, dpi=DPI):
     return img, rotation, mb_w, mb_h
 
 
+class LazyPageImages:
+    """Dict-like view over rendered page images that renders on demand and keeps
+    at most ``cache_size`` pages resident.
+
+    Holding every full-resolution render at once OOM-kills the process on large
+    E-size sets (a 36"x24" sheet at 200 DPI is ~100 MB; 16 floor plans is ~1.6 GB).
+    Tag inference only ever needs one page image at a time (Level 2b crops bubbles
+    page-by-page), so we re-render on access instead of accumulating. Supports the
+    access patterns tag_inference uses: ``idx in imgs``, ``imgs[idx]``,
+    ``imgs.items()``, and truthiness.
+    """
+
+    def __init__(self, pdf_path, page_indices, cache_size=2, dpi=DPI):
+        self.pdf_path = str(pdf_path)
+        self._keys = list(page_indices)
+        self.cache_size = max(1, cache_size)
+        self.dpi = dpi
+        self._cache = OrderedDict()
+
+    def __bool__(self):
+        return bool(self._keys)
+
+    def __len__(self):
+        return len(self._keys)
+
+    def __contains__(self, k):
+        return k in self._keys
+
+    def __getitem__(self, k):
+        if k not in self._keys:
+            raise KeyError(k)
+        if k in self._cache:
+            self._cache.move_to_end(k)
+            return self._cache[k]
+        img, _rot, _w, _h = render_page(self.pdf_path, k, dpi=self.dpi)
+        self._cache[k] = img
+        self._cache.move_to_end(k)
+        while len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
+        return self._cache[k]
+
+    def keys(self):
+        return list(self._keys)
+
+    def items(self):
+        for k in self._keys:
+            yield k, self[k]
+
+
 def display_to_annot(dx, dy, rot, mb_w, mb_h):
     """Convert display pixel coords back to annotation (mediabox) coords for adding annotations."""
     # display image is rendered AFTER rotation, so display coords need to be inverted
@@ -883,8 +933,27 @@ def write_excel(output_path, detections_per_page, project_name, schedule_details
             qty_remark = ''
         qty = data['count']
 
-        ws.cell(row=row, column=1, value=cls if cls != current_cls else '')
-        current_cls = cls
+        # PRODUCT column: the team writes a descriptive product name (e.g.
+        # "LAY-IN", "EGGCRATE RET. GRILLE", "LOUVERED FACE SUPPLY DIFFUSER"),
+        # which lives in the schedule's TYPE/DESCRIPTION (already in `etype`).
+        # YOLO can't tell those air-device subtypes apart (it dumps them into
+        # AD-GRD), so for air devices use the schedule description when it reads
+        # like one; otherwise keep the class. Non-air-device rows are unchanged.
+        product = cls
+        if cls.startswith('AD-') and etype:
+            et = etype.strip()
+            # Use the schedule's descriptive type as the product name when it
+            # reads like one — either a known descriptor word OR a multi-word
+            # phrase ("PERFORATED FACE", "DOUBLE DEFLECTION"). Avoids bare
+            # manufacturer model codes (single tokens like OMNI / PCS / 50F).
+            is_descriptor = bool(re.search(
+                r'DIFFUSER|GRILLE|REGISTER|LINEAR|LAY-?IN|EGGCRATE|LOUVER|SLOT|'
+                r'SUPPLY|RETURN|EXHAUST|T-?BAR|CEILING|PERFORATED|DEFLECTION|'
+                r'FACE|PLAQUE|DRUM|NOZZLE|ADJUSTABLE|FIXED|SIDEWALL', et, re.I))
+            if is_descriptor or ' ' in et:
+                product = et
+        ws.cell(row=row, column=1, value=product if product != current_cls else '')
+        current_cls = product
         ws.cell(row=row, column=2, value=brand)
         ws.cell(row=row, column=3, value=model)
         qty_cell = ws.cell(row=row, column=4, value=qty)
@@ -1176,6 +1245,79 @@ def find_mechanical_pages(pdf_path):
     return candidate_pages
 
 
+# Schedule tables carry a tag/mark column plus several property columns. We use
+# this signal — not the bare word "SCHEDULE" (which appears in general notes
+# prose like "IDENTIFIED IN EQUIPMENT SCHEDULE") — to decide which pages to feed
+# to the (slow) pdfplumber table extractor.
+_SCHED_TAG_HEADERS = ('MARK', 'TAG', 'UNIT TAG', 'UNIT NO', 'EQUIP', 'DESIGNATION')
+_SCHED_PROP_KEYS = ('CFM', 'MODEL', 'MANUFACTURER', 'MBH', 'TONS', 'CAPACITY',
+                    'NECK', 'HP', 'VOLT', 'PHASE', 'SIZE', 'SERVICE', 'GPM',
+                    'ESP', 'RPM', 'WEIGHT', 'SEER', 'BTU')
+
+
+def find_schedule_pages(pdf_path):
+    """Cheap text-layer scan for pages that actually contain equipment SCHEDULE
+    *tables* (a tag/mark column header + several property columns).
+
+    The old code restricted schedule parsing to the M-series *plan* pages, which
+    (a) misses dedicated schedule sheets and (b) runs pdfplumber's expensive
+    table extraction over dense E-size floor plans (15k+ vector paths each → many
+    minutes + heavy memory). Targeting only real schedule-table pages fixes both.
+    Returns 0-based page indices (empty list if none look like schedule tables).
+    """
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception:
+        return []
+    hits = []
+    try:
+        for i in range(doc.page_count):
+            up = doc[i].get_text('text').upper()
+            if not up.strip():
+                continue
+            if 'SCHEDULE' not in up:
+                continue
+            if not any(h in up for h in _SCHED_TAG_HEADERS):
+                continue
+            if sum(1 for k in _SCHED_PROP_KEYS if k in up) >= 4:
+                hits.append(i)
+    finally:
+        doc.close()
+    return hits
+
+
+# Plausible HVAC tag: 1-4 letters, optional dash, 1-3 digits, optional suffix
+# letter (A-1, EF-12, CU-6B, VAV12). Used to reject OCR noise tags.
+_TAG_RE = re.compile(r'^[A-Z]{1,4}-?\d{1,3}[A-Z]?$')
+# Common English/CAD words the OCR fallback tends to scrape from notes &
+# the "NOT FOR CONSTRUCTION" watermark and mistake for tags.
+_OCR_TAG_STOPWORDS = {
+    'AND', 'FOR', 'NOT', 'THE', 'OF', 'OR', 'TO', 'IN', 'ON', 'AT', 'AS',
+    'PER', 'SEE', 'ALL', 'NTS', 'TYP', 'REF', 'REV', 'NEW', 'EXIST',
+    'ARIZ', 'ZONA', 'US', 'USA', 'IBC', 'IMC', 'IECC',
+}
+
+
+def filter_ocr_variables(ocr_vars):
+    """Drop OCR-recovered 'schedule variables' that are clearly noise.
+
+    The raster OCR fallback can scrape note prose and the NOT-FOR-CONSTRUCTION
+    watermark into fake tags (e.g. tag='AND' with properties that are full
+    sentences, or 'P' -> {'0':'ARIZ','NOT':'ZONA'} from 'ARIZONA'). Keep only
+    variables whose tag looks like a real HVAC tag and isn't a stopword.
+    Returns (kept, dropped_count).
+    """
+    kept = []
+    dropped = 0
+    for v in ocr_vars or []:
+        tag = (v.get('tag') or '').strip().upper()
+        if not tag or tag in _OCR_TAG_STOPWORDS or not _TAG_RE.match(tag):
+            dropped += 1
+            continue
+        kept.append(v)
+    return kept, dropped
+
+
 def main():
     parser = argparse.ArgumentParser(description='HVAC Takeoff CLI Tool')
     parser.add_argument('pdf', help='Path to blueprint PDF')
@@ -1188,6 +1330,10 @@ def main():
                         help='Print full schedule variable dump and exit (no detection run)')
     parser.add_argument('--schedule-only', action='store_true',
                         help='Parse schedule and write variables JSON, skip YOLO detection')
+    parser.add_argument('--no-schedule-ocr', dest='no_schedule_ocr', action='store_true',
+                        help='Skip the raster OCR schedule fallback. The fallback renders '
+                             'E-size pages at 200 DPI + EasyOCR (slow + memory-heavy) and on '
+                             'text-readable sets can scrape noise; use this to bypass it.')
     # Future-proofing placeholders — accepted but currently no-op. Reserved for
     # multilingual keyword-set support (see sheet_filter / schedule_parser).
     parser.add_argument('--english-only', action='store_true',
@@ -1262,10 +1408,19 @@ def main():
     # drawing sets.
     print("Parsing schedule...")
     variables = []
+    # Schedules live on schedule SHEETS, not necessarily the plan pages. Target
+    # pages that actually contain schedule tables (tag column + property columns)
+    # instead of running pdfplumber over every dense E-size plan page. Fall back
+    # to the M-series page list only if no schedule-table page is detected.
+    schedule_pages = find_schedule_pages(pdf_path)
+    if schedule_pages:
+        print(f"  Schedule-table pages: {[p + 1 for p in schedule_pages]}")
+    else:
+        schedule_pages = cached_m_series_pages
     try:
         schedules, marks, mark_details, legend, sched_summary, variables = parse_pdf_schedules(
             str(pdf_path),
-            pages=cached_m_series_pages,
+            pages=schedule_pages,
         )
         print(f"  {len(schedules)} schedule table(s), {len(marks)} unique tag(s), "
               f"{len(variables)} variable(s)")
@@ -1286,24 +1441,31 @@ def main():
             if _ocr_dir.is_dir() and str(_ocr_dir) not in _sys.path:
                 _sys.path.insert(0, str(_ocr_dir))
             from schedule_ocr import extract_all_schedules as _ocr_sched
-            if cached_m_series_pages:
-                # cached_m_series_pages are 0-based page indices; schedule_ocr
-                # expects 1-based page numbers.
-                ocr_pages = [p + 1 for p in cached_m_series_pages][:8]
+            # OCR only the pages that look like schedule TABLES, not the dense
+            # E-size plan pages (rendering 8 of those at 200 DPI is the slow,
+            # ~5 GB memory-heavy step that yields only noise). schedule_pages are
+            # 0-based; schedule_ocr expects 1-based page numbers.
+            _ocr_src = schedule_pages or cached_m_series_pages
+            if _ocr_src:
+                ocr_pages = [p + 1 for p in _ocr_src][:8]
             else:
                 import fitz as _fitz
                 _d = _fitz.open(str(pdf_path)); _n = _d.page_count; _d.close()
                 ocr_pages = list(range(1, min(_n, 8) + 1))
             print(f"  Text-layer schedule empty; trying OCR fallback on pages {ocr_pages}...")
             ocr_vars = _ocr_sched(str(pdf_path), ocr_pages, dpi=200)
+            ocr_vars, ocr_dropped = filter_ocr_variables(ocr_vars)
+            if ocr_dropped:
+                print(f"  OCR guard discarded {ocr_dropped} noise 'variable(s)' "
+                      f"(non-tag text scraped from notes/watermark)")
             if ocr_vars:
                 variables = ocr_vars
                 marks = sorted({v.get('tag') for v in variables if v.get('tag')})
                 print(f"  OCR recovered {len(variables)} schedule variable(s): "
                       f"{marks[:10]}{'...' if len(marks) > 10 else ''}")
             else:
-                print("  OCR fallback recovered 0 variables "
-                      "(table reconstruction failed on this sheet)")
+                print("  OCR fallback recovered 0 usable variables "
+                      "(no schedule tables found in this PDF)")
         except Exception as _e:
             print(f"  OCR fallback unavailable/failed: {_e}")
 
@@ -1351,68 +1513,45 @@ def main():
         pages_to_process = [p - 1 for p in args.pages]
     elif args.all_pages:
         pages_to_process = list(range(total_pages))
-    elif cached_m_plan_pages is not None:
-        # Reuse the page list computed up-front — no need to survey twice.
-        pages_to_process = cached_m_plan_pages
     else:
-        pages_to_process = find_mechanical_pages(pdf_path)
-        if not pages_to_process:
-            pages_to_process = list(range(total_pages))
-
-    # NEW: Apply page_classifier filter to skip schedule/legend/details/cover
-    # pages — these are the #1 source of phantom detections (CLAUDE.md #19.5).
-    # Falls back gracefully if the classifier module isn't importable.
-    if not args.pages and not args.all_pages:
+        # Fused page selection (Part 1): ONE per-page verdict that combines the
+        # sheet-number read, the content type, and drawing density, then keeps a
+        # mechanical page UNLESS the content is confidently a non-drawing sheet
+        # (schedule/legend/notes/cover/details). Replaces the old two-stacked
+        # filters (sheet_filter THEN a subordinate page_classifier pass), which
+        # silently dropped real plans numbered M0.x / M5.x / M8.x and pages whose
+        # title block wouldn't OCR, while keeping schedules numbered in the plan
+        # range (phantom source). See page_selector.py + ARCHITECTURE_PARTS.md.
         try:
-            import sys as _sys
-            backend_dir = str(Path(__file__).resolve().parent / 'saas' / 'backend')
-            if backend_dir not in _sys.path:
-                _sys.path.insert(0, backend_dir)
-            from page_classifier import classify_pdf as _classify, NON_PLAN_TYPES as _NON_PLAN
-            classifications = _classify(pdf_path)
-            non_plan = {c.page - 1 for c in classifications if c.type in _NON_PLAN}
-            # Pages whose TITLE BLOCK authoritatively reads as non-plan (e.g.
-            # M-400 "MECHANICAL SCHEDULES"). The title block beats both the
-            # content keyword race AND sheet_filter's number-range guess (which
-            # calls any 4xx a plan), so these may be dropped even if sheet_filter
-            # marked them plan.
-            tb_non_plan = {
-                c.page - 1 for c in classifications
-                if c.type in _NON_PLAN
-                and any(str(e).startswith('title-block=') for e in (c.evidence or []))
-            }
-            # Subordinate the content classifier to the sheet-number filter:
-            # sheet_filter reads the title-block number (incl. OCR), which is
-            # authoritative, whereas page_classifier's plain-text regex misses
-            # CAD vector sheet numbers and can misread a schedule-heavy floor
-            # plan as 'schedule'. Never drop a page sheet_filter approved as an
-            # M-series plan — UNLESS the title block itself says non-plan.
+            import page_selector
+            verdicts = page_selector.classify_pages(pdf_path)
+            pages_to_process = [v['page'] - 1 for v in verdicts if v['is_plan']]
+            dropped = [v['page'] for v in verdicts if not v['is_plan']]
+            print(f"  Page selection (fused): keep {[p + 1 for p in pages_to_process]}"
+                  + (f"; drop {dropped}" if dropped else ""))
             try:
-                from sheet_filter import survey_pdf as _survey, is_m_series as _ism
-                sf_plan = {s.page_idx for s in (_survey(pdf_path) or [])
-                           if s.is_plan and _ism(s.discipline)}
-                non_plan -= (sf_plan - tb_non_plan)
+                with open(out_dir / f"{pdf_path.stem}_page_selection.json", 'w',
+                          encoding='utf-8') as _f:
+                    json.dump(verdicts, _f, indent=2)
             except Exception:
                 pass
-            if non_plan:
-                kept = [p for p in pages_to_process if p not in non_plan]
-                skipped = [p + 1 for p in pages_to_process if p in non_plan]
-                if skipped:
-                    print(f"  Page-classifier skipping {len(skipped)} non-plan page(s): {skipped}")
-                pages_to_process = kept
-                if not pages_to_process:
-                    # All filtered out — fall back to ALL pages to avoid empty run
-                    print(f"  WARN: page filter excluded everything; falling back to all pages")
-                    pages_to_process = list(range(total_pages))
+            if not pages_to_process:
+                print("  WARN: fused selector kept 0 pages; falling back to all pages")
+                pages_to_process = list(range(total_pages))
         except Exception as _e:
-            print(f"  (page_classifier filter unavailable: {_e})")
+            print(f"  (fused page selection unavailable: {_e}; using fallback)")
+            if cached_m_plan_pages:
+                pages_to_process = cached_m_plan_pages
+            else:
+                pages_to_process = find_mechanical_pages(pdf_path) or list(range(total_pages))
 
     print(f"Processing {len(pages_to_process)} page(s) of {total_pages} total\n")
 
-    # Process each page — keep rendered images so tag inference can OCR
-    # bubbles next to each detection (Level 2b)
+    # Process each page. We do NOT keep every rendered image in memory — on
+    # large E-size sets that peaks at ~1.6 GB and OOM-kills the process. The
+    # current page image is detected on, then released; tag inference re-renders
+    # pages on demand via LazyPageImages (it only needs one page at a time).
     detections_per_page = {}
-    page_images = {}
     t_start = time.time()
     for page_idx in pages_to_process:
         t0 = time.time()
@@ -1428,7 +1567,10 @@ def main():
         print(f"{len(dets)} found ({elapsed:.0f}s)")
         if dets:
             detections_per_page[page_idx] = dets
-            page_images[page_idx] = img
+        del img   # release the full-res render before the next page
+
+    # Memory-bounded, lazily-rendered image view for tag inference (Level 2b OCR).
+    page_images = LazyPageImages(pdf_path, list(detections_per_page.keys()))
 
     total_elapsed = time.time() - t_start
     print(f"\nDetection complete in {total_elapsed:.0f}s")
@@ -1444,6 +1586,48 @@ def main():
         for ls in tag_stats.get('levels', []):
             if ls.get('tagged', 0) > 0 or ls.get('mapping'):
                 print(f"  Level {ls.get('level', '?')}: {ls.get('method', '')} — {ls}")
+
+    # ── Change #1: subtype-from-tag ──────────────────────────────────────────
+    # YOLO reliably FINDS air devices but can't distinguish the visually-similar
+    # subtypes (T-BAR / SURF / LINEAR, supply/return) — it dumps most into the
+    # generic AD-GRD. The subtype isn't in the symbol; it's in the tag's schedule
+    # row. So for each tagged air-device detection, override its class with the
+    # tag's scheduled subtype. Benchmark (rescore_aliased.py): the model's
+    # air-device OBJECT recall is ~84% held-out — this captures that as correct
+    # per-subtype output without retraining. Refines WITHIN the air-device family
+    # only (never reclassifies across equipment families).
+    if variables and detections_per_page:
+        from collections import Counter as _C
+        _tag_sub = {}
+        for v in variables:
+            _t, _s = v.get('tag'), v.get('inferred_yolo_class')
+            if _t and _s:
+                _tag_sub.setdefault(_t, _C())[_s] += 1
+        tag_to_subtype = {t: c.most_common(1)[0][0] for t, c in _tag_sub.items()}
+        _AD = 'AD-'
+        _GENERIC = {'AD-GRD'}   # least-specific air-device class
+        refined = _C()
+        for dets in detections_per_page.values():
+            for d in dets:
+                tag = d.get('tag')
+                cur = (d.get('cls') or '')
+                sub = tag_to_subtype.get(tag)
+                # Only refine TO a more specific air-device subtype. Never replace
+                # a specific YOLO label (AD-T-BAR SUPPLY) with the generic AD-GRD
+                # — the schedule is sometimes generic, and degrading would lose
+                # information the detector already had.
+                if (tag and sub and cur.startswith(_AD) and sub.startswith(_AD)
+                        and sub != cur and sub not in _GENERIC):
+                    d['cls_detected'] = cur          # keep original for traceability
+                    d['cls'] = sub
+                    d['cls_source'] = 'tag-schedule'
+                    refined[f'{cur}→{sub}'] += 1
+        if refined:
+            total = sum(refined.values())
+            print(f"  Subtype-from-tag: refined {total} air-device detection(s) "
+                  f"to scheduled subtype")
+            for k, n in refined.most_common(6):
+                print(f"    {n} × {k}")
 
     # Schedule-conditioned post-filter — drop YOLO predictions whose normalized
     # class doesn't appear in the project's schedule, UNLESS the model is very

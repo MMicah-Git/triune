@@ -33,10 +33,14 @@ DEFAULTS = {
     'batch': 8,
     'device': '',          # '' = auto, 'cpu' to force CPU, '0' for GPU
     'patience': 15,        # early stop
-    'optimizer': 'AdamW',  # pin optimizer (auto ignores lr0)
-    'lr0': 0.0005,         # low LR for fine-tuning from v10
+    # v14 REGRESSION FIX (diagnosed 2026-06-19): the old AdamW + lr0=0.0005 +
+    # mosaic=0.3 recipe severely UNDER-trained (v14 detected ~half of v10 at every
+    # confidence, held-out recall 0). Restore v10's proven recipe: SGD + lr0=0.01
+    # + mosaic=0.5. See RETRAIN_SCOPE.md Phase 0.
+    'optimizer': 'SGD',
+    'lr0': 0.01,           # v10's working LR (0.0005 was 20x too low → under-trained)
     # --- Augmentation: tuned for out-of-distribution drawing styles ---
-    'mosaic': 0.3,         # moderate — context variety without shrinking small symbols too far
+    'mosaic': 0.5,         # v10's value — was 0.3/0.0 in the broken v14 run
     'mixup': 0.0,
     'copy_paste': 0.1,     # densify rare classes (class imbalance: AD-GRD/EXHAUST FAN dominate)
     'scale': 0.5,          # scale jitter — robustness to drawing-scale / line-weight variation

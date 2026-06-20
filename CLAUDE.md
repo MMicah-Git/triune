@@ -1,9 +1,137 @@
 # HVAC AI Takeoff Tool — Engineering Reference
 
-**Last updated:** May 11, 2026
+**Last updated:** June 18, 2026
 **Purpose:** Technical reference for engineers (and future Claude Code sessions) working on the codebase. Read this before making changes.
 
 > **Resuming a Claude Code session?** Read this file end-to-end first. Section 19 (added May 5) covers the Label Studio review loop and the 6-project ground-truth dataset feeding v11. Sections 14–17 cover post-April-21 work (tag-bubble detector, title-block extractor). Sections 1–13 are still accurate as of April 21 — minor extensions noted inline.
+
+---
+
+## Stability + schedule-targeting fixes (2026-06-18)
+
+Triggered by a large E-size set (`Mpages & RCP.pdf`, 34 sheets @ 2592×1728 pt / 36"×24",
+16 floor plans) that OOM-killed the in-process backend and left its job stuck in `running`,
+then produced garbage schedule "tags". Four parts fixed and verified end-to-end (the same PDF
+now completes: detection 160s, 71 detections, honest empty-schedule reporting, no crash). See
+also `ARCHITECTURE_PARTS.md` for the 4-part decomposition this work follows.
+
+- **Part 1 — OOM fix (`takeoff_cli.py`).** The page loop accumulated every full-res render in a
+  `page_images` dict (~100 MB per E-size sheet × 16 ≈ 1.6 GB) just so tag inference Level 2b could
+  OCR bubbles. Replaced with **`LazyPageImages`** — a dict-like view (`__getitem__`/`items()`/
+  `__contains__`/`__bool__`) that re-renders a page on demand and keeps ≤2 resident (LRU). Detection
+  now holds one `img` at a time (`del img` each iteration). No detection/accuracy change; trades a
+  little re-render time for ~1.4 GB less peak. This was the actual backend-crash cause.
+- **Part 3 — schedule page targeting (`takeoff_cli.py`).** Old code passed `pages=cached_m_series_pages`
+  (the *plan* pages) to `parse_pdf_schedules`, which (a) misses dedicated schedule SHEETS and (b) runs
+  pdfplumber table extraction over dense E-size plans (15k+ vector paths each → 7+ min + heavy memory).
+  New **`find_schedule_pages()`** does a cheap text scan for pages with a tag-column header
+  (`MARK`/`TAG`/…) + ≥4 property keywords (`CFM`/`MODEL`/…) AND the word `SCHEDULE` — *real schedule
+  tables*, not notes prose that merely mentions "schedule". Falls back to the M-series list if none
+  found. Verified no regression: Pacific 15→15 (identical), Busy Bees 19→17 (the 2 dropped were stray
+  `A` tags with empty schedule names — noise); Mpages now scans only p7 instead of 21 plans.
+- **Part 3 — OCR garbage guard (`takeoff_cli.py`).** The raster OCR fallback scraped note prose and
+  the NOT-FOR-CONSTRUCTION watermark into fake tags (`AND`, `JIXZ`, `P`→`{0:ARIZ, NOT:ZONA}` from
+  "ARIZONA"). New **`filter_ocr_variables()`** keeps only variables whose tag matches a real HVAC tag
+  pattern (`^[A-Z]{1,4}-?\d{1,3}[A-Z]?$`) and isn't a stopword. Also: OCR fallback now targets the
+  detected schedule pages (not 8 dense plans), and **`--no-schedule-ocr`** flag was wired up (it was
+  referenced but never defined in argparse).
+- **Part 4 — stuck-job watchdog (`saas/backend/core/jobs.py` + `main.py`).** Jobs run in-process via
+  BackgroundTasks, so they die with the process; an OOM-killed job stayed `running` forever in the UI.
+  New **`reap_stale_jobs()`** runs on FastAPI startup and flips any `running`/`queued` job to `error`
+  with an honest message. Verified: reaped `9cae8dc5efc9` on restart.
+
+**Key lesson about `Mpages & RCP.pdf`:** it's a *partial export* — only plan sheets (M112–M216), no
+formal equipment-schedule sheets. So 0 schedule variables is correct, not a bug; the pipeline now
+reports that honestly (71 detected, 0 tagged, "no schedule to reconcile") instead of fabricating tags.
+
+---
+
+## Part 1 page selection — fused classifier (2026-06-18)
+
+Page selection (which pages get YOLO detection) is the first of the 4 parts in `ARCHITECTURE_PARTS.md`.
+A cross-corpus diagnostic (`part1_page_diagnostic.py`, runs over every PDF in `saas/data/jobs/`)
+showed the OLD two-stacked-filter logic (`sheet_filter` sheet-number read THEN a subordinate
+`page_classifier` pass) failed badly across engineers' styles: text-layer reads gave NO sheet number
+on ~half of 413 pages, the "M5xx+ = details / M0xx = cover" number-series rule silently DROPPED real
+plans numbered `M0.x`/`M5.x`/`M8.x`, no-number pages were dropped even when obviously plans (Union 888
+lost 6), and schedules numbered in the plan range (Pacific `M-400`) were KEPT → phantoms.
+
+- **New module `page_selector.py`** — ONE fused per-page verdict. Discipline-gate (mechanical?) →
+  then **keep-unless-confident-non-drawing**: keep a mechanical candidate UNLESS `page_classifier`
+  confidently (≥0.70) calls it schedule/legend/notes/cover/details. Number-series is demoted to
+  advisory. Cost-asymmetry: borderline → KEEP (a dropped plan loses all its equipment; an over-kept
+  page only risks phantoms that reconciliation/QA catch). Emits `{type, is_plan, confidence, evidence}`.
+- **Wired into `takeoff_cli.py`** — replaced the old determine-pages + page_classifier-subordination
+  block with `page_selector.classify_pages()`; writes a `{stem}_page_selection.json` sidecar. Falls
+  back to the old sheet_filter/keyword path if the module errors. (`--pages`/`--all-pages` still win.)
+  Verified on Pacific: keeps M-101/M-102, drops M-000 legend + **M-400 schedule** + M-500/501 details.
+- **Benchmark `benchmark_page_selection.py`** — scores the picker vs a per-page answer key
+  (provisional ground truth from the title block via `doc_verification.read_title_block` + discipline;
+  human overrides in `page_selection_gt.json`; `--write-template gt_template.json`). Confidence bar:
+  **plan-page recall ~1.00** (zero dropped plans, the unforgivable error) + precision ≥~0.85
+  (over-keeping is the safe failure). Result so far: **recall=1.00 on all 4 scoreable styles**
+  (MPAGES, Pacific, Busy Bees, MECH Combined); precision 0.5–1.0.
+- **Open:** 9 CAD-style sets read as "uncertain" because their sheet TITLES are vector graphics
+  (OCR reads the number, not the title) — they can only be scored with human labels in
+  `gt_template.json`. That's the remaining verification, not a picker bug.
+
+---
+
+## Part 2 detection — measurement + subtype/product fixes (2026-06-19)
+
+Followed Part 1 with the same discipline: measure → diagnose → fix the right thing. Tools:
+`run_benchmark_suite.py` (count P/R vs Bluebeam truth in `benchmark_manifest.json`),
+`rescore_aliased.py` (collapse air-device subtypes → object-level recall).
+
+**The core finding — the detector is good; the taxonomy/output was wrong:**
+- v10 raw recall ~31-34%, BUT with air-device subtypes aliased: **held-out recall 34%→84%
+  (precision 94%), in-sample 31%→69%; air-device OBJECT recall held-out 100%, in-sample 71%.**
+  The model FINDS the diffusers; it can't tell T-BAR vs SURF vs LINEAR (dumps ~712 into AD-GRD;
+  truth is AD-SURF/T-BAR/LINEAR). `benchmark_output/_part2/per_class.csv`.
+- The subtype is NOT visually distinguishable AND often not in the schedule either (Busy Bees diffuser
+  rows → generic AD-GRD + model codes like OMNI/PCS, not mounting type). The TEAM's takeoffs DO need
+  fine granularity ("LAY-IN", "EGGCRATE RET. GRILLE", "LOUVERED FACE SUPPLY DIFFUSER") — and they
+  source it from the schedule's TYPE/DESCRIPTION column. So the fix is to CARRY that through, not to
+  make YOLO classify subtype.
+- **v14 is broken** (held-out recall 0.00, under-detects everything). Keep v10; gate any retrain on held-out.
+
+**The connected pipeline (Part 1 → 2 → 3 → output), with the new pieces:**
+```
+page_selector.classify_pages   [Part 1]  → plan pages
+        ↓
+parse_pdf_schedules (find_schedule_pages) [Part 3-read] → variables: tag → {inferred_yolo_class,
+        ↓                                                  properties incl. TYPE/DESCRIPTION}
+render + run_inference (YOLO + class_thresholds) [Part 2] → detections_per_page {cls, conf, box}
+        ↓
+infer_tags [Part 3] → each detection gets a `tag`
+        ↓
+CHANGE #1 subtype-from-tag (takeoff_cli, after infer_tags): for a tagged AIR-DEVICE detection,
+        override cls with the tag's scheduled subtype — but ONLY toward a MORE specific subtype
+        (never degrade AD-T-BAR SUPPLY → generic AD-GRD). Keeps original in `cls_detected`.
+        ↓
+schedule-conditioned filter + reconcile [Part 3]
+        ↓
+write_excel [output]: PRODUCT column = the schedule's descriptive TYPE (`etype`) for air devices
+        when it reads like a product name (DIFFUSER/GRILLE/LAY-IN/EGGCRATE/...), else the class.
+        This matches the team's PRODUCT taxonomy using data we already parse.
+```
+
+**Changes made (all no-retrain):**
+- `takeoff_cli.py` — Change #1 subtype-from-tag (after `infer_tags`, guarded to only refine toward a
+  more-specific air-device subtype).
+- `takeoff_cli.py write_excel` — PRODUCT column uses the schedule description for air devices (col 1);
+  format/headers/grouping unchanged (guardrail §13 respected).
+- `class_thresholds.py` — added `DAMPER WITH TAP` 0.55 + raised `OTHER MECHANICAL` 0.40→0.50
+  (pure-phantom classes in the benchmark).
+
+**Data ceiling (honest):** the fine mounting subtype (T-BAR/SURF/LINEAR) is only recoverable when the
+schedule carries a descriptive type. When it carries a model code (OMNI/PCS), you'd need a manufacturer
+model→type lookup — a separate future project. Realistic target = object recall (~84%) + descriptive
+product/direction from the schedule, not vision-guessed mounting subtype.
+
+**Still open:** validate Change #1 + PRODUCT on a schedule that carries subtypes; close the
+correction→retrain→gate→deploy flywheel for the true-miss classes (ROOFTOP UNIT, FIRE SMOKE DAMPER,
+RAIN CAP, RELIEF HOOD — these the detector genuinely misses).
 
 ---
 

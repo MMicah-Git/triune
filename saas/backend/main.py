@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router as jobs_router
 from config import CORS_ORIGINS
+from core.jobs import reap_stale_jobs
 
 app = FastAPI(
     title='HVAC Takeoff API',
@@ -27,6 +28,14 @@ app.add_middleware(
 )
 
 app.include_router(jobs_router)
+
+
+@app.on_event('startup')
+def _reap_stale_jobs_on_startup():
+    """Fail-fast any job left 'running' by a previous crashed/killed process."""
+    reaped = reap_stale_jobs()
+    if reaped:
+        print(f"[startup] Reaped {len(reaped)} stale job(s) stuck in running: {reaped}")
 
 
 @app.get('/health')
