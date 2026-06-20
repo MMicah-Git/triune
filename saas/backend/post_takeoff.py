@@ -80,6 +80,31 @@ def _ocr_candidate_pages(classifications: list) -> list[int]:
     return ordered[:_OCR_MAX_PAGES]
 
 
+import re as _re
+# Plausible HVAC tag: 1-4 letters, optional dash, 1-3 digits, optional suffix.
+_OCR_TAG_RE = _re.compile(r'^[A-Z]{1,4}-?\d{1,3}[A-Z]?$')
+_OCR_TAG_STOP = {'AND', 'FOR', 'NOT', 'THE', 'OF', 'OR', 'TO', 'IN', 'ON', 'AT',
+                 'PER', 'SEE', 'ALL', 'NTS', 'TYP', 'REF', 'REV', 'NEW', 'EXIST',
+                 'ARIZ', 'ZONA', 'US', 'USA', 'IBC', 'IMC', 'IECC'}
+
+
+def _filter_ocr_noise(ocr_vars: list) -> tuple[list, int]:
+    """Drop OCR-recovered 'variables' whose tag isn't a real HVAC tag.
+
+    The raster OCR fallback scrapes note prose and the NOT-FOR-CONSTRUCTION
+    watermark into fake tags (e.g. 'AND', 'JIXZ', 'P'->{0:ARIZ}). Mirrors
+    takeoff_cli.filter_ocr_variables so the web pipeline doesn't re-introduce the
+    garbage that the CLI already filters. Returns (kept, dropped_count)."""
+    kept, dropped = [], 0
+    for v in ocr_vars or []:
+        tag = (v.get('tag') or '').strip().upper()
+        if not tag or tag in _OCR_TAG_STOP or not _OCR_TAG_RE.match(tag):
+            dropped += 1
+            continue
+        kept.append(v)
+    return kept, dropped
+
+
 def _maybe_schedule_ocr(pdf_path: Path, classifications: list, variables: list) -> list:
     """Run OCR fallback when the text-layer parser returned no variables.
 
@@ -97,11 +122,15 @@ def _maybe_schedule_ocr(pdf_path: Path, classifications: list, variables: list) 
     try:
         from schedule_ocr import extract_all_schedules
         ocr_vars = extract_all_schedules(pdf_path, candidate_pages, dpi=200)
+        ocr_vars, dropped = _filter_ocr_noise(ocr_vars)
+        if dropped:
+            print(f'[post_takeoff] OCR guard discarded {dropped} noise "variable(s)" '
+                  '(non-tag text from notes/watermark)')
         if ocr_vars:
-            print(f'[post_takeoff] OCR fallback recovered {len(ocr_vars)} variables')
+            print(f'[post_takeoff] OCR fallback recovered {len(ocr_vars)} usable variables')
         else:
-            print('[post_takeoff] OCR fallback recovered 0 variables '
-                  '(non-extractable text layer + OCR could not reconstruct tables)')
+            print('[post_takeoff] OCR fallback recovered 0 usable variables '
+                  '(no real schedule tables on this PDF)')
         return ocr_vars
     except Exception as e:
         print(f'[post_takeoff] OCR fallback failed: {e}')
