@@ -39,6 +39,13 @@ except Exception:  # pragma: no cover - normalization is best-effort
     def _normalize_class(raw, fold_rare=True):
         return (raw or '').upper().strip()
 
+import re as _re_ct
+def _canon_tag(raw):
+    """Separator-insensitive tag key (EF1 == EF-1). Defined locally to avoid a
+    schedule_parser import (which pulls heavy modules with side effects). Mirrors
+    schedule_parser.canonical_tag."""
+    return _re_ct.sub(r'[\s\-_.]+', '', str(raw or '').upper())
+
 
 # Major equipment where one scheduled tag == one physical unit on the drawing.
 # Detected count of these classes should equal the number of distinct scheduled
@@ -130,8 +137,9 @@ def reconcile(variables, detections_per_page, conf_threshold=0.0):
             delta = detected - expected if expected else 0
 
         # Which scheduled tags of this class never appear on a plan?
-        detected_tags = set(det['tags'].keys())
-        missing_tags = sorted(t for t in expected_tags if t not in detected_tags)
+        # (canonical match so EF1 == EF-1)
+        _det_canon = {_canon_tag(t) for t in det['tags'].keys()}
+        missing_tags = sorted(t for t in expected_tags if _canon_tag(t) not in _det_canon)
 
         confs = det['confs']
         class_rows.append({
@@ -153,8 +161,11 @@ def reconcile(variables, detections_per_page, conf_threshold=0.0):
         detected_tag_counts.update(det['tags'])
     detected_tags = set(detected_tag_counts)
 
-    missing_on_plan = sorted(scheduled_tags - detected_tags)         # scheduled, never detected
-    orphan_tags = sorted(detected_tags - scheduled_tags)             # detected, not in schedule
+    # Match canonically (EF1 == EF-1) but report the ORIGINAL tag strings.
+    sched_canon = {_canon_tag(t): t for t in scheduled_tags}
+    det_canon = {_canon_tag(t): t for t in detected_tags}
+    missing_on_plan = sorted(sched_canon[c] for c in sched_canon if c not in det_canon)  # scheduled, never detected
+    orphan_tags = sorted(det_canon[c] for c in det_canon if c not in sched_canon)        # detected, not in schedule
 
     # ── Project trust score (transparent heuristic, NOT calibrated) ────────
     components = {}
@@ -166,7 +177,8 @@ def reconcile(variables, detections_per_page, conf_threshold=0.0):
         )
 
     if scheduled_tags:
-        components['tag_presence_rate'] = len(scheduled_tags & detected_tags) / len(scheduled_tags)
+        components['tag_presence_rate'] = (
+            len(set(sched_canon) & set(det_canon)) / len(sched_canon))
 
     all_confs = [c for det in det_by_class.values() for c in det['confs']]
     if all_confs:

@@ -31,7 +31,7 @@ from collections import OrderedDict
 
 from tag_extractor import summarize_detections_by_tag
 from tag_inference import infer_tags
-from schedule_parser import parse_pdf_schedules, dump_variables
+from schedule_parser import parse_pdf_schedules, dump_variables, canonical_tag
 
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
@@ -888,7 +888,10 @@ def write_excel(output_path, detections_per_page, project_name, schedule_details
     current_cls = None
     # NEW: hoist tag-property lookup to use variables data if richer than
     # schedule_details. variables has the inferred_yolo_class which we want.
-    variables_by_tag = {(v.get('tag') or '').upper(): v for v in variables if v.get('tag')}
+    # Key by CANONICAL tag so a plan tag "EF1" joins the schedule's "EF-1"
+    # (separator/case-insensitive). Original tag strings are kept for display.
+    variables_by_tag = {canonical_tag(v.get('tag')): v for v in variables if v.get('tag')}
+    details_by_canon = {canonical_tag(k): v for k, v in (schedule_details or {}).items()}
 
     for (cls, tag), data in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
         # Skip untagged class-only rows when we have schedule rows for that class
@@ -896,11 +899,12 @@ def write_excel(output_path, detections_per_page, project_name, schedule_details
         if not tag and any(k[0] == cls and k[1] for k in grouped):
             continue
 
-        # Lookup schedule details for this tag (tolerant of header variations)
-        details = schedule_details.get(tag, {})
+        ctag = canonical_tag(tag)
+        # Lookup schedule details for this tag (tolerant of header + separator variants)
+        details = schedule_details.get(tag, {}) or details_by_canon.get(ctag, {})
         # ALSO check variables — same info but might be richer
-        if not details and tag.upper() in variables_by_tag:
-            details = variables_by_tag[tag.upper()].get('properties') or {}
+        if not details and ctag in variables_by_tag:
+            details = variables_by_tag[ctag].get('properties') or {}
         # Prefer a combined column like "MANUFACTURER & MODEL" or "MAKE / MODEL".
         # Split on " / " if present (MAKE/MODEL convention), else first space.
         brand_model = _prop(details, ['MANUFACTURER & MODEL', 'MAKE / MODEL', 'MAKE/MODEL'])
@@ -925,7 +929,7 @@ def write_excel(output_path, detections_per_page, project_name, schedule_details
         # the schedule entry. Mutate data['count'] so per-class subtotals
         # and GRAND TOTAL stay consistent with the displayed QTY.
         is_schedule_only = (data['count'] == 0 and tag and
-                           tag.upper() in variables_by_tag)
+                           ctag in variables_by_tag)
         if is_schedule_only:
             data['count'] = 1
             qty_remark = '⚠ from schedule — verify on plan'
@@ -1031,7 +1035,7 @@ def write_excel(output_path, detections_per_page, project_name, schedule_details
     for page_idx in sorted(detections_per_page.keys()):
         for d in sorted(detections_per_page[page_idx], key=lambda x: (x['cls'], x.get('tag') or '')):
             tag = d.get('tag') or ''
-            details = schedule_details.get(tag, {})
+            details = schedule_details.get(tag, {}) or details_by_canon.get(canonical_tag(tag), {})
             brand_model = _prop(details, ['MANUFACTURER & MODEL', 'MANUFACTURER'])
             if brand_model and ' ' in brand_model and not _prop(details, ['MODEL']):
                 brand, model = brand_model.split(' ', 1)

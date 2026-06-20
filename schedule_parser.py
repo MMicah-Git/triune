@@ -88,6 +88,16 @@ BANNED_TAG_PREFIXES = {
 EXCLUDE_PREFIXES = set()
 
 
+def canonical_tag(raw):
+    """Separator-insensitive key for MATCHING a tag across sources.
+
+    A tag read off the plan ("EF1") and the same tag in the schedule ("EF-1")
+    must join. We uppercase and strip spaces/dashes/dots/underscores so EF1,
+    EF-1, EF 1, EF.1 all collapse to 'EF1'. Use ONLY as a lookup key, never for
+    display (the original tag string is preserved for output)."""
+    return re.sub(r'[\s\-_.]+', '', str(raw or '').upper())
+
+
 def normalize_tag(raw):
     """Clean up tag string, return None if invalid."""
     if not raw:
