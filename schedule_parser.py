@@ -81,6 +81,9 @@ BANNED_TAG_PREFIXES = {
     'NOTES', 'NOTE', 'ROUTING', 'ROUTE', 'SCHEDULE', 'SCHED',
     'DETAIL', 'PAGE', 'SHEET', 'DWG', 'REF', 'SEE',
     'REV', 'DATE', 'ITEM',
+    # Note/spec words that leak in from prose cells, not equipment tags:
+    'MINIMUM', 'MIN', 'MAXIMUM', 'MAX', 'ETC', 'TYP', 'TYPICAL',
+    'GENERAL', 'PROVIDE', 'EXISTING', 'REMARKS', 'REMARK',
 }
 
 # No equipment type filtering — extract ALL tags from all schedules.
@@ -180,6 +183,11 @@ def normalize_tag(raw):
     # Drawing sheet numbers (M101, E202, P301) — single letter + 3 digits.
     # Equipment tags never use this pattern; sheet indexes always do.
     if re.match(r'^[A-Za-z]\d{3}$', s):
+        return None
+
+    # Sheet detail callout: a sheet number with a detail index ("M501-9",
+    # "E202-3") — references a drawing detail, never an equipment tag.
+    if re.match(r'^[A-Za-z]\d{3}-\d+$', s):
         return None
 
     # Two-letter sheet numbers from a drawing index (FP001 = Fire Protection,
