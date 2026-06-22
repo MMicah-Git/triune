@@ -50,11 +50,41 @@ def completed_tag_sizes(xlsx):
     return out
 
 
+def _expected_shape(type_str):
+    """From the schedule type/description, the neck shape we expect.
+    PLAQUE FACE / diffuser / ceiling -> round; sidewall / duct / grille -> rect."""
+    u = (type_str or '').upper()
+    if any(k in u for k in ('SIDEWALL', 'SIDE WALL', 'DUCT', 'GRILLE', 'REGISTER', 'LINEAR')):
+        return 'rect'
+    if any(k in u for k in ('PLAQUE', 'DIFFUSER', 'CEILING', 'ROUND')):
+        return 'round'
+    return None
+
+
+def _shape_of(size_str):
+    return 'rect' if 'X' in size_str.upper() else 'round'
+
+
 def run(pdf, det_json, truth_xlsx, label):
     print(f'\n===== {label} =====')
     d = fitz.open(pdf)
     det = json.load(open(det_json, encoding='utf-8'))
     truth = completed_tag_sizes(truth_xlsx)
+    # tag -> expected neck shape, from the parsed schedule
+    shape_by_tag = {}
+    vg = glob.glob(str(det_json).rsplit('_detections.json', 1)[0] + '_variables.json')
+    if vg:
+        for v in json.load(open(vg[0], encoding='utf-8')):
+            t = v.get('tag')
+            if not t:
+                continue
+            props = v.get('properties') or {}
+            typ = ''
+            for k, val in props.items():
+                if any(w in k.upper() for w in ('TYPE', 'DESCRIPTION', 'SERVICE')):
+                    typ = str(val)
+                    break
+            shape_by_tag[t.upper().replace('-', '')] = _expected_shape(typ)
     tag_sizes = defaultdict(list)
     covered = total = 0
     for pk, dets in det.get('pages', {}).items():
@@ -79,14 +109,29 @@ def run(pdf, det_json, truth_xlsx, label):
             _c = fitz.Point((x['x1'] + x['x2']) / 2 * DPI_TO_PT,
                             (x['y1'] + x['y2']) / 2 * DPI_TO_PT) * mat
             cx, cy = _c.x, _c.y
-            best, bd = None, PROX_PT
-            for (sx, sy), s in toks:
-                dd = math.hypot(sx - cx, sy - cy)
-                if dd < bd:
-                    bd, best = dd, s
+            ctag = (x.get('tag') or '?').upper().replace('-', '')
+            want = shape_by_tag.get(ctag)
+            # candidates within proximity, sorted by distance
+            cands = sorted(
+                ((math.hypot(sx - cx, sy - cy), s) for (sx, sy), s in toks
+                 if math.hypot(sx - cx, sy - cy) <= PROX_PT),
+                key=lambda t: t[0])
+            best = None
+            if cands:
+                nearest_d, nearest_s = cands[0]
+                best = nearest_s
+                # Gentle shape tiebreaker: only override the nearest token with a
+                # shape-matching one if that match is nearly as close (within a
+                # small margin). Avoids dragging a close-correct callout to a far
+                # wrong-shape one (which hurt R2's round 12").
+                if want and _shape_of(nearest_s) != want:
+                    margin = 1.6 * nearest_d + 25
+                    sm = next((s for dd, s in cands if _shape_of(s) == want and dd <= margin), None)
+                    if sm is not None:
+                        best = sm
             if best:
                 covered += 1
-                tag_sizes[(x.get('tag') or '?').upper().replace('-', '')].append(best)
+                tag_sizes[ctag].append(best)
     print(f'AD detections: {total} | got a nearby size: {covered} ({100*covered//total if total else 0}%)')
     print(f'distinct size tokens found on plan: '
           f'{sum(len(parse_size(w[4]) is not None and [1] or []) for p in range(d.page_count) for w in d[p].get_text("words"))}')
