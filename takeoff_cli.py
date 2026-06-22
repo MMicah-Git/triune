@@ -801,15 +801,26 @@ def write_excel(output_path, detections_per_page, project_name, schedule_details
         cell.font = Font(bold=True)
         cell.fill = PatternFill('solid', fgColor='DDDDDD')
 
-    # Group detections by (class, tag) and fill in schedule details
-    grouped = defaultdict(lambda: {'count': 0, 'pages': set()})
+    # Group detections by (class, tag) and fill in schedule details.
+    # Also accumulate a per-group breakdown of the plan-read neck size
+    # (neck_size_reader's neck_size_plan) so the Excel can split a tag into one
+    # row per neck size (e.g. S1 -> 6 @ 6" + 4 @ 8"), matching the team's takeoff.
+    _TIER_ORDER = {'HIGH': 3, 'MED': 2, 'LOW': 1, '': 0}
+    grouped = defaultdict(lambda: {'count': 0, 'pages': set(), 'neck': {}})
     for page_idx, dets in detections_per_page.items():
         for d in dets:
             cls = d['cls']
             tag = d.get('tag') or ''
             key = (cls, tag)
-            grouped[key]['count'] += 1
-            grouped[key]['pages'].add(page_idx + 1)
+            g = grouped[key]
+            g['count'] += 1
+            g['pages'].add(page_idx + 1)
+            nk = d.get('neck_size_plan')
+            if nk:
+                e = g['neck'].setdefault(nk, {'count': 0, 'tier': ''})
+                e['count'] += 1
+                if _TIER_ORDER.get(d.get('neck_tier', ''), 0) > _TIER_ORDER.get(e['tier'], 0):
+                    e['tier'] = d.get('neck_tier', '')
 
     # NEW: If we have rich schedule variables, pre-seed grouped with one
     # entry per schedule tag (count=0) so the Excel emits a row even when
@@ -978,25 +989,47 @@ def write_excel(output_path, detections_per_page, project_name, schedule_details
                 r'FACE|PLAQUE|DRUM|NOZZLE|ADJUSTABLE|FIXED|SIDEWALL', et, re.I))
             if is_descriptor or ' ' in et:
                 product = et
-        ws.cell(row=row, column=1, value=product if product != current_cls else '')
-        current_cls = product
-        ws.cell(row=row, column=2, value=brand)
-        ws.cell(row=row, column=3, value=model)
-        qty_cell = ws.cell(row=row, column=4, value=qty)
-        if is_schedule_only:
-            qty_cell.fill = PatternFill('solid', fgColor='FFF2CC')  # light yellow
-            qty_cell.font = Font(italic=True)
-        ws.cell(row=row, column=5, value=tag)
-        ws.cell(row=row, column=6, value=neck_size)
-        ws.cell(row=row, column=7, value=module_size)
-        ws.cell(row=row, column=8, value=duct_size)
-        ws.cell(row=row, column=9, value=etype)
-        ws.cell(row=row, column=10, value=mounting)
+        # Split into one row per plan-read neck size (e.g. S1 -> 6@6" + 4@8"),
+        # matching the team's completed takeoff. Detections without a neck size
+        # collapse into a remainder row using the schedule neck. No neck data at
+        # all -> a single row, exactly as before (format unchanged).
+        neck_break = data.get('neck') or {}
+        necked = sum(e['count'] for e in neck_break.values())
+        row_specs = []  # (qty, neck_value, extra_remark)
+        if necked > 0:
+            for nk in sorted(neck_break):
+                e = neck_break[nk]
+                flag = ' (verify)' if e['tier'] == 'LOW' else ''
+                row_specs.append((e['count'], nk, flag))
+            remainder = qty - necked
+            if remainder > 0:
+                row_specs.append((remainder, neck_size, ''))
+        else:
+            row_specs.append((qty, neck_size, ''))
+
         page_list = ', '.join(str(p) for p in sorted(data['pages']))
-        remark = f"Pages: {page_list}" if page_list else ''
+        base_remark = f"Pages: {page_list}" if page_list else ''
         if qty_remark:
-            remark = f'{qty_remark}  ·  {remark}' if remark else qty_remark
-        ws.cell(row=row, column=11, value=remark)
+            base_remark = f'{qty_remark}  ·  {base_remark}' if base_remark else qty_remark
+
+        for (rqty, rneck, rflag) in row_specs:
+            ws.cell(row=row, column=1, value=product if product != current_cls else '')
+            current_cls = product
+            ws.cell(row=row, column=2, value=brand)
+            ws.cell(row=row, column=3, value=model)
+            qty_cell = ws.cell(row=row, column=4, value=rqty)
+            if is_schedule_only:
+                qty_cell.fill = PatternFill('solid', fgColor='FFF2CC')  # light yellow
+                qty_cell.font = Font(italic=True)
+            ws.cell(row=row, column=5, value=tag)
+            ws.cell(row=row, column=6, value=rneck)
+            ws.cell(row=row, column=7, value=module_size)
+            ws.cell(row=row, column=8, value=duct_size)
+            ws.cell(row=row, column=9, value=etype)
+            ws.cell(row=row, column=10, value=mounting)
+            ws.cell(row=row, column=11, value=(base_remark + rflag).strip())
+            row += 1
+        row -= 1  # the shared trailer below does its own += 1
         total += qty
         row += 1
 
