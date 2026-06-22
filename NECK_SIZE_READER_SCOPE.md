@@ -139,6 +139,30 @@ against PNC's completed takeoff. Results:
 **Verdict:** GO. The sizes are recoverable from text (no OCR needed for this style); the
 existing reader fails on a fixable geometry bug, not a data gap. Tooling: `neck_validate.py`.
 
+## Slice 2 — PROGRESS (2026-06-22, the geometry is solved)
+
+Applied the derotation transform (detection display-pt × `page.derotation_matrix`
+→ mediabox, then nearest size callout). Re-ran `neck_validate.py` on PNC:
+
+- **Coverage 45/45 (100%)** — every air-device detection now lands next to a real
+  size callout (was 3/45 before the transform).
+- **Per-tag accuracy ~7/10 on the first naive pass:** S1→6"/8", R1→8", S2→6",
+  S3→12X6/14X6, S6→8", R2→12" all match the completed takeoff. S1 recovered BOTH
+  6" and 8" — the exact instance split we're after.
+- **Misses are association errors, not geometry:** S4 (rect 24X4) grabbed a nearby
+  round 6"; dense areas occasionally pull a neighbor's callout.
+
+**Remaining Slice 2 work (refinement + integration):**
+1. **Round-vs-rect disambiguation** — prefer the callout SHAPE that matches the device
+   (round-neck diffusers vs rect grilles/ducts); use the schedule's type as a hint.
+2. **Leader/association** — when several callouts are near, prefer the one on the
+   symbol's leader line / closest of the correct shape, not just nearest token.
+3. **Integrate** into `post_takeoff.py`: write `neck_size`/`duct_size` onto each
+   detection (behind a flag), persist to `*_detections.json`.
+
+**Status: the hard risk (geometry) is retired.** Recovery is real and high-coverage;
+what's left is association polish + wiring. Tooling: `neck_validate.py` (derotation-aware).
+
 ## One-line summary
 The reader mostly **exists** (5-level cascade + runner); the build is to **measure
 it against the completed takeoffs, wire it into post_takeoff, group the Excel by
