@@ -57,6 +57,49 @@ def _parse_color(color_str: str) -> tuple[float, float, float]:
     return parts[0], parts[1], parts[2]
 
 
+# Bluebeam custom-column definitions, replicated from the team's takeoff so our
+# stamped PDF's Markup List shows the SAME columns (BRAND/MODEL/NECK/TYPE/...).
+# Catalog key /BSIAnnotColumns -> this array; each annotation's /BSIColumnData
+# array fills values BY INDEX into this array (Choice cols simplified to Text).
+BSI_COLUMN_DEFS = (
+    "[ << /Subtype /Text /Name (ACCESSORIES1) /DisplayOrder 8 /Multiline false >>"
+    " << /Subtype /Text /Name (MODEL) /DisplayOrder 1 /Multiline false >>"
+    " << /Subtype /Text /Name (BRAND) /DisplayOrder 0 /Multiline false >>"
+    " << /Subtype /Text /Name (REMARK) /DisplayOrder 10 /Multiline false >>"
+    " << /Subtype /Text /Name (NECK SIZE) /DisplayOrder 2 /Multiline false >>"
+    " << /Subtype /Text /Name (TYPE) /DisplayOrder 6 /Multiline false >>"
+    " << /Subtype /Text /Name (UNIT) /DisplayOrder -1 /Deleted true /Multiline false >>"
+    " << /Subtype /Text /Name (MOUNTING) /DisplayOrder 7 /Multiline false >>"
+    " << /Subtype /Text /Name (CFM) /DisplayOrder 5 /Multiline false >>"
+    " << /Subtype /Text /Name (R1) /DisplayOrder -1 /Deleted true /Multiline false >>"
+    " << /Subtype /Text /Name (U1) /DisplayOrder -1 /Deleted true /Multiline false >>"
+    " << /Subtype /Text /Name (DUCT SIZE) /DisplayOrder 4 /Multiline false >>"
+    " << /Subtype /Text /Name (UNITS) /DisplayOrder 11 /Multiline false >>"
+    " << /Subtype /Text /Name (TEST) /DisplayOrder -1 /Deleted true /Multiline false >>"
+    " << /Subtype /Text /Name (MODULE SIZE) /DisplayOrder 3 /Multiline false >>"
+    " << /Subtype /Text /Name (ACCESSORIES2) /DisplayOrder 9 /Multiline false >>"
+    " << /Subtype /Text /Name (DAMPER TYPE) /DisplayOrder 12 /Multiline false >>"
+    " << /Subtype /Text /Name (LOCATION) /DisplayOrder -1 /Deleted true /Multiline false >>"
+    " << /Subtype /Text /Name (HET OR DAM) /DisplayOrder -1 /Deleted true /Multiline false >> ]"
+)
+# index in BSIColumnData -> our value key (others stay empty)
+BSI_INDEX = {1: 'model', 2: 'brand', 4: 'neck', 5: 'type', 7: 'mounting',
+             8: 'cfm', 11: 'duct', 14: 'module', 15: 'accessories', 16: 'damper'}
+BSI_NCOLS = 19
+
+
+def _pdf_str_escape(s):
+    return str(s or '').replace('\\', r'\\').replace('(', r'\(').replace(')', r'\)')
+
+
+def _bsi_column_data(values: dict) -> str:
+    """Build a /BSIColumnData array string from a {key: value} dict."""
+    cells = [''] * BSI_NCOLS
+    for idx, key in BSI_INDEX.items():
+        cells[idx] = values.get(key, '') or ''
+    return '[' + ' '.join('(' + _pdf_str_escape(c) + ')' for c in cells) + ']'
+
+
 def write_stamps(input_pdf: Path, detections_json: Path, output_pdf: Path,
                  author: str = 'AI', do_enrich: bool = True,
                  do_page_filter: bool = True) -> dict:
@@ -120,6 +163,15 @@ def write_stamps(input_pdf: Path, detections_json: Path, output_pdf: Path,
     px_to_pt = 72.0 / src_dpi
 
     doc = fitz.open(str(input_pdf))
+
+    # Register Bluebeam custom columns in the catalog so the Markup List shows
+    # the team's columns (BRAND/MODEL/NECK SIZE/TYPE/MOUNTING/MODULE/DUCT/...).
+    try:
+        _cdx = doc.get_new_xref()
+        doc.update_object(_cdx, BSI_COLUMN_DEFS)
+        doc.xref_set_key(doc.pdf_catalog(), 'BSIAnnotColumns', f'{_cdx} 0 R')
+    except Exception as _e:
+        print(f'[bluebeam] column-def injection skipped: {_e}')
 
     # PyMuPDF's add_polygon_annot doesn't apply page rotation when writing
     # /Rect and /Vertices — it only does a Y-flip. For rotated pages this
@@ -272,6 +324,48 @@ def write_stamps(input_pdf: Path, detections_json: Path, output_pdf: Path,
             #    correction-loop parser reads.
             xref = annot.xref
             doc.xref_set_key(xref, 'IT', '/PolygonCount')
+
+            # Bluebeam custom-column values so the Markup List columns populate
+            # (BRAND/MODEL/NECK/TYPE/MOUNTING/MODULE/DUCT/CFM) — same as the
+            # team's takeoff. Label = the tag (Bluebeam 'Label' column).
+            if det_tag:
+                _p = vars_by_tag.get(_canon(det_tag)) or {}
+                _brand = _prop(_p, ['MANUFACTURER', 'BRAND', 'MAKE'])
+                _model = _prop(_p, ['MODEL NUMBER', 'MODEL'])
+                _bm = _prop(_p, ['MANUFACTURER & MODEL', 'MAKE / MODEL', 'MAKE/MODEL'])
+                if _bm and not _brand:
+                    _parts = _bm.split(' / ') if ' / ' in _bm else _bm.split(' ', 1)
+                    _brand = _parts[0]
+                    _model = _model or (_parts[1] if len(_parts) > 1 else '')
+                _facev = _prop(_p, ['FACE SIZE', 'MODULE SIZE', 'MODULE', 'NOMINAL SIZE', 'FACE'])
+                _ductv = _prop(_p, ['DUCT SIZE', 'DUCT'])
+                _neckv = det.get('neck_size_plan') or _prop(_p, ['NECK', 'SIZE (NECK)'])
+                if not _neckv:
+                    _gs = _prop(_p, ['SIZE'])
+                    if _gs and _gs not in (_facev, _ductv):
+                        _neckv = _gs
+                _typev = _prop(_p, ['TYPE', 'DESCRIPTION', 'SERVICE'])
+                _mountv = _prop(_p, ['MOUNTING', 'MOUNT'])
+                if not _mountv and _typev:    # derive mounting like write_excel does
+                    _tu = _typev.upper()
+                    if 'DUCT' in _tu:
+                        _mountv = 'DUCT'
+                    elif 'SIDEWALL' in _tu:
+                        _mountv = 'SURFACE'
+                    elif any(k in _tu for k in ('LAY-IN', 'LAY IN', 'T-BAR', 'T BAR')):
+                        _mountv = 'LAY-IN'
+                vals = {
+                    'model': _model, 'brand': _brand, 'neck': _neckv,
+                    'type': _typev, 'mounting': _mountv,
+                    'cfm': _prop(_p, ['CFM']), 'duct': _ductv, 'module': _facev,
+                    'accessories': _prop(_p, ['ACCESSOR', 'MATERIAL']),
+                    'damper': det.get('damper_type', ''),
+                }
+                try:
+                    doc.xref_set_key(xref, 'BSIColumnData', _bsi_column_data(vals))
+                    doc.xref_set_key(xref, 'Label', f'({_pdf_str_escape(det_tag)})')
+                except Exception:
+                    pass
 
             written_by_subject[subj] += 1
 
