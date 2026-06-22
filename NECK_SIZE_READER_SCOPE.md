@@ -163,6 +163,24 @@ Applied the derotation transform (detection display-pt × `page.derotation_matri
 **Status: the hard risk (geometry) is retired.** Recovery is real and high-coverage;
 what's left is association polish + wiring. Tooling: `neck_validate.py` (derotation-aware).
 
+### Update — round-vs-rect + exclusive assignment tried (2026-06-22)
+- **Round-vs-rect shape tiebreaker: KEPT.** Prefer the callout shape matching the
+  device type (round diffuser vs rect grille), but only within a distance margin so a
+  close-correct token isn't dragged to a far wrong-shape one. Result on PNC: **6/6
+  detected tags with truth match** (R1/R2/S1/S2/S3/S6), S1 recovers both 6" and 8".
+- **Exclusive (greedy) assignment: TRIED, REVERTED.** Assigning each token to one
+  detection prevented double-claims but *regressed* R2 (greedy handed its correct 12"
+  token to a nearer detection) and did NOT fix the S4↔S5 swap (adjacent same-model
+  grilles ~equidistant to each other's callouts). Net worse on this set.
+- **The real limit: no per-instance ground truth.** The completed takeoff gives per-TAG
+  size sets, not which token belongs to which exact box, so association precision (S4 vs
+  S5) can't be measured/tuned reliably, and the coarse tag metric even substring-
+  false-positives. Pushing further needs per-box labels + leader-line geometry —
+  diminishing returns to chase blind.
+- **Recommendation:** the reader is good enough to ship behind confidence flags.
+  Next move = INTEGRATE (write neck/duct + a confidence tier onto detections; flag
+  low-confidence sizes as "verify") rather than tune association without better truth.
+
 ## One-line summary
 The reader mostly **exists** (5-level cascade + runner); the build is to **measure
 it against the completed takeoffs, wire it into post_takeoff, group the Excel by
