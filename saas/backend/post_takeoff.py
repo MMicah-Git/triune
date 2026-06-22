@@ -269,6 +269,19 @@ def run_post_pipeline(
     except Exception as e:
         print(f'[post_takeoff] typ/nic failed: {e}')
 
+    # --- Stage 6.7: per-instance neck/duct sizes from plan callouts ---
+    # Reads the size labels (8"Ø, 12X6) next to each air device off the plan text
+    # layer and attaches neck_size_plan + a confidence tier to each detection.
+    # Low-confidence sizes are tiered LOW so the Excel/stamps can flag "verify".
+    try:
+        from neck_size_reader import annotate_neck_sizes
+        neck_summary = annotate_neck_sizes(detections, input_pdf, variables)
+        _save_json(detections_json, detections)  # persist for stamps + UI
+        manifest['stats']['neck_sizes'] = neck_summary
+        print(f"[post_takeoff] neck sizes: {neck_summary}")
+    except Exception as e:
+        print(f'[post_takeoff] neck-size reader failed: {e}')
+
     # --- Stage 11: fill missing data ---
     fill_stats = fill_missing_data(variables) if variables else {}
     manifest['stats']['fill'] = fill_stats

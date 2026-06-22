@@ -232,6 +232,12 @@ def write_stamps(input_pdf: Path, detections_json: Path, output_pdf: Path,
                         content_parts.append(f"module={_face}")
                     if _duct:
                         content_parts.append(f"duct={_duct}")
+            # Per-INSTANCE neck size read off the plan callout (neck_size_reader).
+            # This is the real size for THIS device; flag it when low-confidence
+            # so the estimator verifies instead of trusting a guess.
+            if det.get('neck_size_plan'):
+                _flag = ' [verify]' if det.get('neck_tier') == 'LOW' else ''
+                content_parts.append(f"neck(plan)={det['neck_size_plan']}{_flag}")
             if det.get('damper_type'):                          # Rule B
                 content_parts.append(f"damper={det['damper_type']}")
                 n_crd += 1
