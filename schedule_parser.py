@@ -68,6 +68,11 @@ JUNK_TAGS = {
     'N.T.S.', 'NTS', 'SEE', 'ALL', 'EACH', 'TOTAL', 'COL_1',
     'VAV', 'FCU', 'AHU', 'RTU',  # prefix-only (need number)
     'RR',  # junk fragment seen in Aritzia schedule
+    'BARS',  # leaked from a "grille bars" note (CityVet/Atascocita)
+    # Electrical/spec units & headers that leak from adjacent columns — never
+    # equipment tags (HP stays valid: it's a heat-pump prefix used as HP-1):
+    'HZ', 'V', 'PH', 'KW', 'MCA', 'MOCP', 'FLA', 'RLA', 'MBH',
+    'GPM', 'PSI', 'RPM', 'BTU', 'AMP', 'AMPS', 'VOLT', 'VOLTS',
 }
 
 # Refrigerant designations commonly appear in schedules as a dedicated row
@@ -185,9 +190,10 @@ def normalize_tag(raw):
     if re.match(r'^[A-Za-z]\d{3}$', s):
         return None
 
-    # Sheet detail callout: a sheet number with a detail index ("M501-9",
-    # "E202-3") — references a drawing detail, never an equipment tag.
-    if re.match(r'^[A-Za-z]\d{3}-\d+$', s):
+    # Sheet detail callout: a sheet number (single letter + 3 digits) followed
+    # by ANY suffix ("M501-9", "M501-PROVIDE", "E202-3") references a drawing
+    # detail/note, never an equipment tag.
+    if re.match(r'^[A-Za-z]\d{3}-', s):
         return None
 
     # Two-letter sheet numbers from a drawing index (FP001 = Fire Protection,

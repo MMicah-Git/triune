@@ -1458,11 +1458,17 @@ def main():
         print(f"  Schedule parse failed: {e}")
         schedules, marks, mark_details = [], [], {}
 
-    # OCR fallback: when the text-layer parser found no variables (e.g. a
-    # CAD-exported PDF with broken/non-extractable font encoding), read the
-    # schedule from the rendered pixels instead. The OCR module lives in
-    # saas/backend; import it lazily so the CLI has no hard EasyOCR dependency.
-    if not variables and not getattr(args, 'no_schedule_ocr', False):
+    # OCR fallback: when the text-layer parser found FEW variables (zero, or a
+    # handful of garbage tags from a CAD export with broken/non-extractable font
+    # encoding — e.g. CityVet), read the schedule from the rendered pixels
+    # instead. A broken-font set yields ~0-4 junk tags; a real schedule yields
+    # more, so a low count is the trigger. We only REPLACE the text-layer result
+    # when OCR recovers strictly more tags (i.e. the text layer was broken).
+    # The OCR module lives in saas/backend; import it lazily so the CLI has no
+    # hard EasyOCR dependency.
+    SCHEDULE_OCR_MIN = 5
+    _text_layer_vars = list(variables)
+    if len(variables) < SCHEDULE_OCR_MIN and not getattr(args, 'no_schedule_ocr', False):
         try:
             import sys as _sys
             _ocr_dir = Path(__file__).resolve().parent / 'saas' / 'backend'
@@ -1480,17 +1486,22 @@ def main():
                 import fitz as _fitz
                 _d = _fitz.open(str(pdf_path)); _n = _d.page_count; _d.close()
                 ocr_pages = list(range(1, min(_n, 8) + 1))
-            print(f"  Text-layer schedule empty; trying OCR fallback on pages {ocr_pages}...")
+            _why = 'empty' if not _text_layer_vars else f'only {len(_text_layer_vars)} tag(s) (likely broken font)'
+            print(f"  Text-layer schedule {_why}; trying OCR fallback on pages {ocr_pages}...")
             ocr_vars = _ocr_sched(str(pdf_path), ocr_pages, dpi=200)
             ocr_vars, ocr_dropped = filter_ocr_variables(ocr_vars)
             if ocr_dropped:
                 print(f"  OCR guard discarded {ocr_dropped} noise 'variable(s)' "
                       f"(non-tag text scraped from notes/watermark)")
-            if ocr_vars:
+            if ocr_vars and len(ocr_vars) > len(_text_layer_vars):
                 variables = ocr_vars
                 marks = sorted({v.get('tag') for v in variables if v.get('tag')})
-                print(f"  OCR recovered {len(variables)} schedule variable(s): "
+                print(f"  OCR recovered {len(variables)} schedule variable(s) "
+                      f"(replacing {len(_text_layer_vars)} broken text-layer tag(s)): "
                       f"{marks[:10]}{'...' if len(marks) > 10 else ''}")
+            elif _text_layer_vars:
+                print(f"  OCR found {len(ocr_vars)} ≤ text-layer {len(_text_layer_vars)}; "
+                      f"keeping text-layer tags")
             else:
                 print("  OCR fallback recovered 0 usable variables "
                       "(no schedule tables found in this PDF)")
