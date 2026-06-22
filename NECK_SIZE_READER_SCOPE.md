@@ -105,6 +105,40 @@ overnight change; this is the feature that closes the gap to the team's detail.
 
 ---
 
+## Slice 1 — FINDINGS (2026-06-22, validated on PNC Medical)
+
+Ran the existing Level 1 + a standalone nearest-callout validator (`neck_validate.py`)
+against PNC's completed takeoff. Results:
+
+1. **The data IS in the text layer (good news).** PNC's floor plan has the neck/duct
+   sizes as real text: `8"Ø`, `12"X10"`, `14"X6"`, `6"Ø`, `12"X6"`, `6"X6"` — and they
+   **match the completed takeoff** (S1=6"/8", R1=8"/10", S3=12X6/14X6, etc.). So a
+   text-based reader is viable; we do NOT necessarily need OCR (Level 3) for this style.
+
+2. **Existing Level 1 recovered 0 of 48.** Three root causes, in order of impact:
+   - **(CRITICAL) Page rotation.** Every PNC page is `rotation=90`. Detection boxes are
+     200-DPI top-down pixels; text words are rotated PDF points. The current
+     `DPI_TO_PT` conversion ignores rotation, so the proximity search compares
+     mis-aligned coordinates → almost nothing is "near" a detection. The nearest-callout
+     validator got 3/45 for the same reason.
+   - **Tag-anchor assumption.** Level 1 Strategy B needs the TAG in the text layer to
+     pair a size to. PNC's tags are vector bubbles (read by OCR in detection), not text —
+     so there's nothing to anchor. Fix: use the detection's ALREADY-KNOWN tag and attach
+     the nearest size, instead of re-finding the tag in text.
+   - **Format mismatch.** `BARE_ROUND` doesn't allow a trailing `Ø`; there's no bare-rect
+     pattern for `12"X10"` (quotes on both numbers). Both are easy regex extensions.
+
+3. **So Slice 2's real work is geometry, not OCR:**
+   - Reuse the **rotation-aware transform** from `write_bluebeam_stamps.py` (it already
+     builds derotation matrices) to map detection boxes into text-layer space.
+   - Attach the **nearest size callout to each detection** using the detection's known tag.
+   - Extend patterns for `Ø` + quoted rects.
+   - Then the hard part is **association** (multiple sizes near multiple symbols) — tune
+     proximity + prefer the size token whose shape matches the device (round vs rect).
+
+**Verdict:** GO. The sizes are recoverable from text (no OCR needed for this style); the
+existing reader fails on a fixable geometry bug, not a data gap. Tooling: `neck_validate.py`.
+
 ## One-line summary
 The reader mostly **exists** (5-level cascade + runner); the build is to **measure
 it against the completed takeoffs, wire it into post_takeoff, group the Excel by
