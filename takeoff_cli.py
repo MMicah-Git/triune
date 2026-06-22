@@ -1800,6 +1800,21 @@ def main():
     annotated_pdf_path = out_dir / f"{pdf_path.stem}_annotated.pdf"
     excel_path = out_dir / f"{pdf_path.stem}_takeoff.xlsx"
 
+    # Per-instance neck/duct sizes from plan callouts — must run BEFORE
+    # write_excel so the Excel can split rows by neck size (and the detections
+    # carry neck_size_plan for the Bluebeam hover). The reader lives in
+    # saas/backend; import lazily so the CLI has no hard dependency on it.
+    try:
+        import sys as _sys
+        _bk = Path(__file__).resolve().parent / 'saas' / 'backend'
+        if _bk.is_dir() and str(_bk) not in _sys.path:
+            _sys.path.insert(0, str(_bk))
+        from neck_size_reader import annotate_neck_sizes
+        _neck = annotate_neck_sizes({'pages': detections_per_page}, pdf_path, variables)
+        print(f"  Neck sizes (plan callouts): {_neck}")
+    except Exception as _e:
+        print(f"  Neck-size reader skipped: {_e}")
+
     print(f"Writing outputs...")
     print(f"  Annotated PDF:  {annotated_pdf_path}")
     annotate_pdf(str(pdf_path), str(annotated_pdf_path), detections_per_page)
