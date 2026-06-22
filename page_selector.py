@@ -88,10 +88,19 @@ def decide_page(page_index, sf, cc) -> dict:
         mechanical = False
         evidence.append(f'discipline={disc} (other trade)')
     else:
-        # No / unrecognized sheet number → defer to content. Treat as a
-        # mechanical candidate only if the content looks like a plan, so we
-        # don't sweep in unrelated trades on a multi-discipline set.
-        mechanical = cc_type in PLAN_CONTENT_TYPES
+        # No / unrecognized sheet number → defer to content. Keep as a
+        # mechanical candidate if the content looks like a plan OR the
+        # non-plan verdict is only weakly held. A schedule-SATURATED floor
+        # plan (e.g. PNC page 2, Busy Bees M101) often misreads as a
+        # low-confidence 'schedule', and its title block won't OCR so the
+        # number reads as an equipment tag (AHU-1, RTU-2). Dropping it loses
+        # the ENTIRE plan's equipment — so only a CONFIDENT doc verdict
+        # (>= DOC_DROP_CONFIDENCE) may disqualify an unreadable-number page;
+        # otherwise cost-asymmetry says keep and let reconciliation/QA catch
+        # any phantoms. Real schedule/legend sheets still read as high-conf
+        # docs and are dropped below.
+        confident_doc = cc_type in DOC_CONTENT_TYPES and cc_conf >= DOC_DROP_CONFIDENCE
+        mechanical = (cc_type in PLAN_CONTENT_TYPES) or (not confident_doc)
         evidence.append(f'no-readable-number; content={cc_type or "?"}')
 
     if cc_type:
