@@ -917,9 +917,31 @@ def write_excel(output_path, detections_per_page, project_name, schedule_details
         else:
             brand = _prop(details, ['MANUFACTURER', 'BRAND', 'MAKE'])
             model = _prop(details, ['MODEL NUMBER', 'MODEL'])
-        neck_size = _prop(details, ['NECK', 'SIZE (NECK)', 'SIZE'])
+        # Size columns: keep each in its OWN bucket. A bare "SIZE" keyword
+        # wrongly pulls a "FACE SIZE" column into NECK SIZE, so look neck /
+        # face(module) / duct up separately. FACE SIZE is the module/face
+        # dimension (e.g. 24 X 24), NOT the neck.
+        neck_size = _prop(details, ['NECK', 'SIZE (NECK)'])
+        module_size = _prop(details, ['FACE SIZE', 'MODULE SIZE', 'MODULE', 'NOMINAL SIZE', 'FACE'])
+        duct_size = _prop(details, ['DUCT SIZE', 'DUCT'])
+        # Fallback: a generic "SIZE" column (not the face/module/duct one) is
+        # almost always the neck size on older schedules — preserve that.
+        if not neck_size:
+            generic_size = _prop(details, ['SIZE'])
+            if generic_size and generic_size not in (module_size, duct_size):
+                neck_size = generic_size
         etype = _prop(details, ['SERVICE', 'TYPE', 'DESCRIPTION'])
         mounting = _prop(details, ['MOUNTING', 'MOUNT'])
+        # Mounting is often only implied by the DESCRIPTION text — derive it for
+        # the unambiguous cases estimators use; leave blank when unclear.
+        if not mounting and etype:
+            et_u = etype.upper()
+            if 'DUCT' in et_u:
+                mounting = 'DUCT'
+            elif 'SIDEWALL' in et_u:
+                mounting = 'SURFACE'
+            elif 'LAY-IN' in et_u or 'LAY IN' in et_u or 'T-BAR' in et_u or 'T BAR' in et_u:
+                mounting = 'LAY-IN'
 
         # When QTY would be 0 but the tag exists in the schedule, default to
         # 1 (assumed-from-schedule) and flag the row for the estimator to
@@ -966,6 +988,8 @@ def write_excel(output_path, detections_per_page, project_name, schedule_details
             qty_cell.font = Font(italic=True)
         ws.cell(row=row, column=5, value=tag)
         ws.cell(row=row, column=6, value=neck_size)
+        ws.cell(row=row, column=7, value=module_size)
+        ws.cell(row=row, column=8, value=duct_size)
         ws.cell(row=row, column=9, value=etype)
         ws.cell(row=row, column=10, value=mounting)
         page_list = ', '.join(str(p) for p in sorted(data['pages']))
