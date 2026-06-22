@@ -78,6 +78,33 @@ def write_stamps(input_pdf: Path, detections_json: Path, output_pdf: Path,
     pages = det_data.get('pages', {})
     src_dpi = det_data.get('dpi', 200)
 
+    # Load the parsed schedule (variables.json sidecar) so each markup's hover
+    # can carry the tag's real specs (type, neck/module/duct size) — the same
+    # data the Excel uses. Keyed by canonical tag (EF1 == EF-1).
+    import re as _re_ct
+    def _canon(t):
+        return _re_ct.sub(r'[\s\-_.]+', '', str(t or '').upper())
+    def _prop(props, keywords):
+        if not props:
+            return ''
+        for k, v in props.items():
+            kn = ' '.join(str(k).upper().split())
+            for kw in keywords:
+                if kw in kn:
+                    return str(v)
+        return ''
+    vars_by_tag = {}
+    try:
+        _vpath = detections_json.parent / detections_json.name.replace(
+            '_detections.json', '_variables.json')
+        if _vpath.exists():
+            for _var in json.loads(_vpath.read_text(encoding='utf-8')):
+                _t = _var.get('tag')
+                if _t:
+                    vars_by_tag[_canon(_t)] = _var.get('properties') or {}
+    except Exception:
+        vars_by_tag = {}
+
     # Page-type classification — skip non-plan pages
     skipped_pages_meta = {}
     skipped_non_plan_pages = set()
@@ -174,12 +201,37 @@ def write_stamps(input_pdf: Path, detections_json: Path, output_pdf: Path,
             # estimator sees the team's tagging convention on hover.
             content_parts = [ai_cls]
             tag_for_count = None
-            if det.get('context_tag'):                          # Rule A
+            det_tag = det.get('context_tag') or det.get('tag')
+            if det.get('context_tag'):                          # Rule A (context wins)
                 tag_for_count = det['context_tag']
                 content_parts.append(f"tag={det['context_tag']}")
                 content_parts.append(f"type={det['context_type']}")
                 if det['context_tag'] == 'FSD-OP':
                     n_fsd_op += 1
+            elif det.get('tag'):                                 # inferred schedule tag
+                tag_for_count = det['tag']
+                content_parts.append(f"tag={det['tag']}")
+            # Schedule-derived specs on the hover (type, neck/module/duct size) —
+            # same data as the Excel, so the markup carries the full detail.
+            if det_tag:
+                _props = vars_by_tag.get(_canon(det_tag))
+                if _props:
+                    _neck = _prop(_props, ['NECK', 'SIZE (NECK)'])
+                    _face = _prop(_props, ['FACE SIZE', 'MODULE SIZE', 'MODULE', 'NOMINAL SIZE', 'FACE'])
+                    _duct = _prop(_props, ['DUCT SIZE', 'DUCT'])
+                    if not _neck:
+                        _g = _prop(_props, ['SIZE'])
+                        if _g and _g not in (_face, _duct):
+                            _neck = _g
+                    _etype = _prop(_props, ['TYPE', 'DESCRIPTION', 'SERVICE'])
+                    if _etype and not any(p.startswith('type=') for p in content_parts):
+                        content_parts.append(f"type={_etype}")
+                    if _neck:
+                        content_parts.append(f"neck={_neck}")
+                    if _face:
+                        content_parts.append(f"module={_face}")
+                    if _duct:
+                        content_parts.append(f"duct={_duct}")
             if det.get('damper_type'):                          # Rule B
                 content_parts.append(f"damper={det['damper_type']}")
                 n_crd += 1
